@@ -193,7 +193,7 @@
   }
 
   // ---------- your data (progress, bookmarks, notes, drills)
-  const blank = () => ({ progress: {}, notes: {}, bookmarks: {}, drills: {}, favs: {}, dlists: {}, roadmaps: {}, snotes: {}, roadmap: { steps: [], updated: 0 }, settings: { updated: 0 } });
+  const blank = () => ({ progress: {}, notes: {}, bookmarks: {}, drills: {}, favs: {}, dlists: {}, roadmaps: {}, snotes: {}, tags: {}, tagdefs: {}, roadmap: { steps: [], updated: 0 }, settings: { updated: 0 } });
   const Store = {
     d: Object.assign(blank(), readJSON('bjj.data.v1', {})),
     save() { writeJSON('bjj.data.v1', this.d); Sync.schedule(); },
@@ -211,6 +211,7 @@
       progress: mergeMap(a.progress, b.progress), notes: mergeMap(a.notes, b.notes),
       bookmarks: mergeMap(a.bookmarks, b.bookmarks), drills: mergeMap(a.drills, b.drills), favs: mergeMap(a.favs, b.favs),
       dlists: mergeMap(a.dlists, b.dlists), roadmaps: mergeMap(a.roadmaps, b.roadmaps), snotes: mergeMap(a.snotes, b.snotes),
+      tags: mergeMap(a.tags, b.tags), tagdefs: mergeMap(a.tagdefs, b.tagdefs),
       roadmap: ((b.roadmap || {}).updated || 0) > ((a.roadmap || {}).updated || 0) ? b.roadmap : (a.roadmap || { steps: [], updated: 0 }),
       settings: ((b.settings || {}).updated || 0) > ((a.settings || {}).updated || 0) ? b.settings : a.settings,
     };
@@ -338,6 +339,64 @@
   function toggleFav(id) { Store.d.favs[id] = { on: !isFav(id), updated: now() }; Store.save(); return isFav(id); }
   const favLabel = id => isFav(id) ? '⭐ Favorite' : '☆ Favorite';
 
+  // ---------- tags (ready-made + your own), on videos and instructionals
+  const PRESET_TAGS = ['Guard passing', 'Guard retention', 'Closed guard', 'Half guard', 'Open guard', 'Butterfly guard', 'De La Riva',
+    'Leg locks', 'Back attacks', 'Mount', 'Side control', 'Turtle', 'Escapes', 'Sweeps', 'Takedowns', 'Wrestling',
+    'Chokes', 'Arm locks', 'Submissions', 'Fundamentals', 'Gi', 'No-gi', 'Self defense', 'Conditioning'];
+  const customTags = () => Object.values(Store.d.tagdefs).filter(t => !t.deleted).map(t => t.name).sort((a, b) => a.localeCompare(b));
+  const allTags = () => [...PRESET_TAGS, ...customTags().filter(t => !PRESET_TAGS.includes(t))];
+  const tagsOf = id => { const live = new Set(allTags()); return ((Store.d.tags[id] && Store.d.tags[id].list) || []).filter(t => live.has(t)); };
+  function setTags(id, list) { Store.d.tags[id] = { list, updated: now() }; Store.save(); }
+  // A video's own tags plus the tags of its instructional.
+  const effTags = (v, s) => [...new Set([...tagsOf(v.id), ...tagsOf(s.id)])];
+  function usedTags() {
+    const count = new Map();
+    for (const id of Object.keys(Store.d.tags)) {
+      if (!Library.get(id) && !Library.series(id)) continue;
+      for (const t of tagsOf(id)) count.set(t, (count.get(t) || 0) + 1);
+    }
+    return [...count.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).map(x => x[0]);
+  }
+  const tagLink = (t, cls = '') => `<a class="tag ${cls}" href="#/tag/${enc(t)}">${esc(t)}</a>`;
+  // Tag chips + the edit button. `inh` = instructional whose tags this video inherits.
+  function tagsInner(id, inh) {
+    const own = tagsOf(id), inherited = inh ? tagsOf(inh).filter(t => !own.includes(t)) : [];
+    return own.map(t => tagLink(t)).join('') + inherited.map(t => tagLink(t, 'inh')).join('')
+      + `<button class="tag add" data-act="editTags" data-id="${esc(id)}">🏷️ ${own.length ? 'Edit tags' : '+ Add tags'}</button>`;
+  }
+  const tagBox = (id, inh) => `<div class="tags" data-for="${esc(id)}" data-inh="${esc(inh || '')}">${tagsInner(id, inh)}</div>`;
+  // Popup: tap tags to turn them on/off, or create a new one.
+  function pickTags(title, selected) {
+    return new Promise(resolve => {
+      const d = $('#dlg'), sel = new Set(selected);
+      let finished = false;
+      const done = v => { if (finished) return; finished = true; d.close(); resolve(v); };
+      const draw = (typed = '') => {
+        d.innerHTML = `<h3>${esc(title)}</h3>
+          <div class="tagpick">${allTags().map((t, i) => `<button class="chip ${sel.has(t) ? 'on' : ''}" data-i="${i}">${sel.has(t) ? '✓ ' : ''}${esc(t)}</button>`).join('')}</div>
+          <div class="addrow"><input id="newTag" maxlength="40" placeholder="Make your own tag…" value="${esc(typed)}"><button class="btn ghost" id="addTag">+ Add</button></div>
+          <div class="dlg-btns"><button class="btn ghost" id="dlgNo">Cancel</button><button class="btn primary" id="dlgOk">Save</button></div>`;
+        const tags = allTags();
+        $$('.tagpick .chip', d).forEach(b => { b.onclick = () => { const t = tags[+b.dataset.i]; sel.has(t) ? sel.delete(t) : sel.add(t); draw($('#newTag').value); }; });
+        const add = () => {
+          const name = $('#newTag').value.trim().replace(/\s+/g, ' ');
+          if (!name) return;
+          const existing = allTags().find(t => t.toLowerCase() === name.toLowerCase());
+          if (existing) sel.add(existing);
+          else { Store.d.tagdefs[name.toLowerCase()] = { name, created: now(), updated: now() }; Store.save(); sel.add(name); }
+          draw();
+        };
+        $('#addTag').onclick = add;
+        $('#newTag').onkeydown = e => { if (e.key === 'Enter') add(); };
+        $('#dlgOk').onclick = () => done(allTags().filter(t => sel.has(t)));
+        $('#dlgNo').onclick = () => done(null);
+      };
+      d.oncancel = e => { e.preventDefault(); done(null); };
+      draw();
+      d.showModal();
+    });
+  }
+
   // ---------- roadmaps (named study orders of instructionals, each with notes + drills)
   // The first version had one unnamed roadmap; turn it into "My roadmap".
   function migrate() {
@@ -452,7 +511,7 @@
     const q = new URLSearchParams(qs || '');
     setTab(parts[0] === 'note' ? 'study' : ['study', 'settings', 'roadmap'].includes(parts[0]) ? parts[0] : 'home');
     window.scrollTo(0, 0);
-    const page = { series: () => SeriesPage(parts[1]), watch: () => Watch(parts[1], q.has('t') ? +q.get('t') : null), roadmap: Roadmap, group: () => GroupPage(parts[1]), note: () => NotePage(parts[1]),
+    const page = { series: () => SeriesPage(parts[1]), watch: () => Watch(parts[1], q.has('t') ? +q.get('t') : null), roadmap: Roadmap, group: () => GroupPage(parts[1]), note: () => NotePage(parts[1]), tag: () => TagPage(parts[1]),
       study: () => Study(q.get('tab') || 'bookmarks'), settings: Settings, pick: () => Picker(parts[1] || 'root') }[parts[0]] || Home;
     Promise.resolve().then(page).catch(fail);
   }
@@ -477,6 +536,8 @@
 
   function homeRows(lib) {
     let html = '';
+    const used = usedTags();
+    if (used.length) html += `<div class="chips tagrow">${used.map(t => tagLink(t)).join('')}</div>`;
     for (const nx of roadmaps().map(nextOf).filter(Boolean).slice(0, 3)) {
       html += `<a class="next-card" href="#/watch/${enc(nx.v.id)}">
         <div class="thumb">${thumb(nx.v)}${bar(nx.v.id)}</div>
@@ -523,6 +584,21 @@
       <div class="vtxt"><b>${isFav(s.id) ? '⭐ ' : ''}${seriesDone(s) ? '✓ ' : ''}${esc(s.name)}</b>${extra ? `<small>${esc(extra)}</small>` : ''}<small>${n} videos${d ? ` · ${d} done` : ''}</small></div></a></li>`;
   }
 
+  // Everything with one tag: tagged instructionals, then tagged videos.
+  function TagPage(tag) {
+    const series = ((Library.data && Library.data.series) || []);
+    const sHits = series.filter(s => tagsOf(s.id).includes(tag));
+    const vHits = [];
+    for (const s of series) for (const v of s.videos) if (tagsOf(v.id).includes(tag)) vHits.push({ v, s });
+    const others = usedTags().filter(t => t !== tag);
+    app.innerHTML = `<a class="back" href="#/">‹ Library</a><h1>🏷️ ${esc(tag)}</h1>
+      ${others.length ? `<div class="chips tagrow">${others.map(t => tagLink(t)).join('')}</div>` : ''}
+      ${sHits.length ? `<h3>📼 Instructionals (${sHits.length})</h3><ul class="list">${sHits.map(s => srow(s, s.group && s.group.name)).join('')}</ul>` : ''}
+      ${vHits.length ? `<h3>🎬 Videos (${vHits.length})</h3><ul class="list">${vHits.map(({ v, s }) => videoRow(v, fullName(s))).join('')}</ul>` : ''}
+      ${!sHits.length && !vHits.length ? emptyState('Nothing tagged yet', `Open an instructional or video and tap "🏷️ + Add tags" to tag it "${tag}".`) : ''}`;
+    applySizes();
+  }
+
   function GroupPage(id) {
     const g = Library.data && groups(Library.data).find(x => x.group && x.group.id === id);
     if (!g) { app.innerHTML = emptyState('Not found', 'This folder is not in your library.', '#/', 'Back'); return; }
@@ -553,9 +629,9 @@
   function searchResults(q) {
     const words = q.split(/\s+/).filter(Boolean), hits = [];
     const all = hay => words.every(w => hay.toLowerCase().includes(w));
-    const sHits = Library.data.series.filter(s => all(fullName(s)));
+    const sHits = Library.data.series.filter(s => all(fullName(s) + ' ' + tagsOf(s.id).join(' ')));
     for (const s of Library.data.series) for (const v of s.videos) {
-      if (all(v.name + ' ' + v.sub + ' ' + fullName(s))) hits.push({ v, s });
+      if (all(v.name + ' ' + v.sub + ' ' + fullName(s) + ' ' + effTags(v, s).join(' '))) hits.push({ v, s });
     }
     if (!hits.length && !sHits.length) return emptyState('Nothing found', 'Try a different word, like "guard" or "heel hook".');
     let html = '';
@@ -585,6 +661,7 @@
         ${inRms.length < roadmaps().length || !roadmaps().length ? `<button class="btn ghost" data-act="rmAdd" data-id="${esc(s.id)}">🗺️ Add to roadmap</button>` : ''}
         ${d < s.videos.length ? `<button class="btn ghost" data-act="allDone" data-id="${esc(s.id)}">✓ Mark all done</button>` : ''}
       </div>
+      ${tagBox(s.id)}
       <ul class="list">${s.videos.map(v => videoRow(v, v.sub)).join('')}</ul>`;
     applySizes();
   }
@@ -693,6 +770,7 @@
       <div class="watch-info">
         <h1>${esc(vid.name)}</h1>
         <a class="muted" href="#/series/${enc(series.id)}">${esc(fullName(series))}${vid.sub ? ' · ' + esc(vid.sub) : ''} ›</a>
+        ${tagBox(id, series.id)}
         <div class="actions">
           <button class="btn ${isDone(id) ? 'primary' : 'ghost'}" id="doneBtn">${isDone(id) ? '✓ Done' : 'Mark as done'}</button>
           <button class="btn ${isFav(id) ? 'primary' : 'ghost'}" id="favBtn">${favLabel(id)}</button>
@@ -1057,6 +1135,10 @@
       <div class="panel"><h3>📱 App</h3>
         ${standalone ? '<p>Installed on your home screen ✓</p>' : installEvt ? '<button class="btn primary" id="install">Add to home screen</button>' : '<p class="small">To add it to your home screen: in Chrome tap <b>⋮</b> then <b>Add to Home screen</b>.</p>'}
         <div class="btns"><button class="btn ghost" id="theme">${theme === 'dark' ? '☀️ Light mode' : '🌙 Dark mode'}</button></div></div>
+      <div class="panel"><h3>🏷️ My custom tags</h3>
+        ${customTags().length ? `<ul class="list">${Object.entries(Store.d.tagdefs).filter(([, t]) => !t.deleted).sort((a, b) => a[1].name.localeCompare(b[1].name)).map(([k, t]) => `
+          <li class="srow"><a class="dtxt" href="#/tag/${enc(t.name)}">${esc(t.name)}</a><button class="ibtn" data-act="delTag" data-id="${esc(k)}" aria-label="Delete tag">🗑</button></li>`).join('')}</ul>`
+          : '<p class="small muted">None yet. Make one from "🏷️ + Add tags" on any video or instructional.</p>'}</div>
       <div class="panel"><h3>☁️ Backup</h3>
         <p class="small">Bookmarks, notes and progress are saved on this phone and backed up to a private app folder in your OneDrive (<b>Apps › Mat Study</b>).<br><span class="muted">Last backup: ${DEMO ? 'demo mode' : ago(Sync.last)}${Sync.failed ? ' (will retry)' : ''}</span></p>
         <div class="btns"><button class="btn ghost" id="syncNow">Back up now</button><button class="btn ghost" id="export">Download a copy</button></div></div>
@@ -1131,6 +1213,21 @@
       if (!confirm(`Delete the roadmap "${cur.name}"? Its drills move to General. Your videos and progress are not touched.`)) return;
       saveRm({ ...cur, deleted: true });
       toast('Roadmap deleted', { label: 'Undo', fn: () => { saveRm({ ...Store.d.roadmaps[id], deleted: false }); localStorage.setItem('bjj.rm', id); route(); } });
+      route(); return;
+    } else if (act === 'editTags') {
+      const name = (Library.get(id) && Library.get(id).v.name) || (Library.series(id) && Library.series(id).name) || '';
+      const picked = await pickTags('Tags for ' + name, tagsOf(id));
+      if (!picked) return;
+      setTags(id, picked);
+      // Update just the tag row (so a playing video isn't interrupted).
+      $$('.tags', app).filter(x => x.dataset.for === id).forEach(box => { box.innerHTML = tagsInner(id, box.dataset.inh); });
+      toast(picked.length ? 'Tags saved 🏷️' : 'Tags removed');
+      return;
+    } else if (act === 'delTag') {
+      const def = Store.d.tagdefs[id];
+      if (!def || !confirm(`Delete the tag "${def.name}"? It will be removed from everything that has it.`)) return;
+      Store.d.tagdefs[id] = { ...def, deleted: true, updated: now() }; Store.save();
+      toast('Tag deleted', { label: 'Undo', fn: () => { Store.d.tagdefs[id] = { ...def, deleted: false, updated: now() }; Store.save(); route(); } });
       route(); return;
     } else if (act === 'selDl') { sessionStorage.setItem('bjj.dl', id); route(); return; }
     else if (act === 'newList') {

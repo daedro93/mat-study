@@ -93,6 +93,20 @@
       setTimeout(() => $('#dlgIn').focus(), 60);
     });
   }
+  // A popup with one big button per choice. Resolves to the chosen value, or null.
+  function choose(title, options) {
+    return new Promise(resolve => {
+      const d = $('#dlg');
+      d.innerHTML = `<h3>${esc(title)}</h3><div class="choices">${options.map((o, i) => `<button class="btn ghost full" data-i="${i}">${esc(o.label)}</button>`).join('')}</div>
+        <div class="dlg-btns"><button class="btn ghost" id="dlgNo">Cancel</button></div>`;
+      let finished = false;
+      const done = v => { if (finished) return; finished = true; d.close(); resolve(v); };
+      $$('.choices button', d).forEach(b => { b.onclick = () => done(options[+b.dataset.i].value); });
+      $('#dlgNo').onclick = () => done(null);
+      d.oncancel = e => { e.preventDefault(); done(null); };
+      d.showModal();
+    });
+  }
   // Placeholder when a thumbnail fails to load.
   document.addEventListener('error', e => {
     const t = e.target;
@@ -179,7 +193,7 @@
   }
 
   // ---------- your data (progress, bookmarks, notes, drills)
-  const blank = () => ({ progress: {}, notes: {}, bookmarks: {}, drills: {}, favs: {}, roadmap: { steps: [], updated: 0 }, settings: { updated: 0 } });
+  const blank = () => ({ progress: {}, notes: {}, bookmarks: {}, drills: {}, favs: {}, dlists: {}, roadmaps: {}, snotes: {}, roadmap: { steps: [], updated: 0 }, settings: { updated: 0 } });
   const Store = {
     d: Object.assign(blank(), readJSON('bjj.data.v1', {})),
     save() { writeJSON('bjj.data.v1', this.d); Sync.schedule(); },
@@ -196,6 +210,7 @@
     return {
       progress: mergeMap(a.progress, b.progress), notes: mergeMap(a.notes, b.notes),
       bookmarks: mergeMap(a.bookmarks, b.bookmarks), drills: mergeMap(a.drills, b.drills), favs: mergeMap(a.favs, b.favs),
+      dlists: mergeMap(a.dlists, b.dlists), roadmaps: mergeMap(a.roadmaps, b.roadmaps), snotes: mergeMap(a.snotes, b.snotes),
       roadmap: ((b.roadmap || {}).updated || 0) > ((a.roadmap || {}).updated || 0) ? b.roadmap : (a.roadmap || { steps: [], updated: 0 }),
       settings: ((b.settings || {}).updated || 0) > ((a.settings || {}).updated || 0) ? b.settings : a.settings,
     };
@@ -217,6 +232,7 @@
         if (meta && meta['@microsoft.graph.downloadUrl']) {
           const remote = await (await fetch(meta['@microsoft.graph.downloadUrl'])).json();
           Store.d = Object.assign(blank(), merge(Store.d, remote));
+          migrate();
           writeJSON('bjj.data.v1', Store.d);
         }
         if (this.dirty || !meta) {
@@ -322,16 +338,62 @@
   function toggleFav(id) { Store.d.favs[id] = { on: !isFav(id), updated: now() }; Store.save(); return isFav(id); }
   const favLabel = id => isFav(id) ? '⭐ Favorite' : '☆ Favorite';
 
-  // ---------- roadmap (your study order of instructionals)
-  const rmIds = () => Store.d.roadmap.steps || [];
-  function setRoadmap(steps) { Store.d.roadmap = { steps, updated: now() }; Store.save(); }
-  const rmSteps = () => rmIds().map(id => Library.series(id)).filter(Boolean);
-  function roadmapNext() {
-    const steps = rmSteps();
+  // ---------- roadmaps (named study orders of instructionals, each with notes + drills)
+  // The first version had one unnamed roadmap; turn it into "My roadmap".
+  function migrate() {
+    const old = Store.d.roadmap;
+    if (old && old.steps && old.steps.length && !Store.d.roadmaps['rm-main']) {
+      Store.d.roadmaps['rm-main'] = { id: 'rm-main', name: 'My roadmap', steps: [...old.steps], notes: '', created: 1, updated: old.updated || now() };
+      writeJSON('bjj.data.v1', Store.d);
+    }
+  }
+  migrate();
+  const byCreated = (a, b) => (a.created || 0) - (b.created || 0);
+  const roadmaps = () => Object.values(Store.d.roadmaps).filter(r => !r.deleted).sort(byCreated);
+  function curRoadmap() {
+    const all = roadmaps(), id = localStorage.getItem('bjj.rm');
+    return all.find(r => r.id === id) || all[0] || null;
+  }
+  function saveRm(r) { Store.d.roadmaps[r.id] = { ...r, updated: now() }; Store.save(); return Store.d.roadmaps[r.id]; }
+  function newRoadmap(name) {
+    const r = { id: uid(), name, steps: [], notes: '', created: now(), updated: now() };
+    Store.d.roadmaps[r.id] = r; Store.save(); localStorage.setItem('bjj.rm', r.id);
+    return r;
+  }
+  const rmSteps = r => r.steps.map(id => Library.series(id)).filter(Boolean);
+  function nextOf(r) {
+    const steps = rmSteps(r);
     const i = steps.findIndex(s => !seriesDone(s));
     if (i < 0) return null;
     const s = steps[i];
-    return { s, v: s.videos.find(v => !isDone(v.id)), step: i + 1, total: steps.length };
+    return { r, s, v: s.videos.find(v => !isDone(v.id)), step: i + 1, total: steps.length };
+  }
+  // Ask which roadmap (only when there is more than one).
+  async function pickRoadmap(title) {
+    const all = roadmaps();
+    if (!all.length) {
+      const r = await ask({ title: 'Name your first roadmap', placeholder: 'e.g. Leg lock path', okLabel: 'Create' });
+      return r ? newRoadmap(r.text || 'My roadmap') : null;
+    }
+    if (all.length === 1) return all[0];
+    const id = await choose(title, all.map(r => ({ label: '🗺️ ' + r.name, value: r.id })));
+    return id ? Store.d.roadmaps[id] : null;
+  }
+
+  // ---------- drill lists (General + your own named lists + one per roadmap)
+  const dlists = () => Object.values(Store.d.dlists).filter(l => !l.deleted).sort(byCreated);
+  // A drill whose list was deleted falls back to General.
+  const listOf = d => (d.listId && ((Store.d.dlists[d.listId] && !Store.d.dlists[d.listId].deleted) || (Store.d.roadmaps[d.listId] && !Store.d.roadmaps[d.listId].deleted))) ? d.listId : null;
+  const allLists = () => [{ id: null, name: 'General' }, ...dlists().map(l => ({ id: l.id, name: l.name })), ...roadmaps().map(r => ({ id: r.id, name: '🗺️ ' + r.name }))];
+  const listName = id => (allLists().find(l => l.id === id) || { name: 'General' }).name;
+  async function pickList() {
+    const all = allLists();
+    if (all.length === 1) return { id: null };
+    const last = sessionStorage.getItem('bjj.dl');
+    const opts = all.map(l => ({ label: l.name, value: l.id === null ? 'general' : l.id }));
+    if (last && last !== 'all') opts.sort((a, b) => (b.value === last) - (a.value === last)); // last used first
+    const v = await choose('Add to which drill list?', opts);
+    return v ? { id: v === 'general' ? null : v } : null;
   }
 
   function continueList() {
@@ -388,9 +450,9 @@
     const [path, qs] = location.hash.slice(1).split('?');
     const parts = (path || '/').split('/').filter(Boolean).map(decodeURIComponent);
     const q = new URLSearchParams(qs || '');
-    setTab(['study', 'settings', 'roadmap'].includes(parts[0]) ? parts[0] : 'home');
+    setTab(parts[0] === 'note' ? 'study' : ['study', 'settings', 'roadmap'].includes(parts[0]) ? parts[0] : 'home');
     window.scrollTo(0, 0);
-    const page = { series: () => SeriesPage(parts[1]), watch: () => Watch(parts[1], q.has('t') ? +q.get('t') : null), roadmap: Roadmap, group: () => GroupPage(parts[1]),
+    const page = { series: () => SeriesPage(parts[1]), watch: () => Watch(parts[1], q.has('t') ? +q.get('t') : null), roadmap: Roadmap, group: () => GroupPage(parts[1]), note: () => NotePage(parts[1]),
       study: () => Study(q.get('tab') || 'bookmarks'), settings: Settings, pick: () => Picker(parts[1] || 'root') }[parts[0]] || Home;
     Promise.resolve().then(page).catch(fail);
   }
@@ -415,10 +477,11 @@
 
   function homeRows(lib) {
     let html = '';
-    const nx = roadmapNext();
-    if (nx) html += `<a class="next-card" href="#/watch/${enc(nx.v.id)}">
+    for (const nx of roadmaps().map(nextOf).filter(Boolean).slice(0, 3)) {
+      html += `<a class="next-card" href="#/watch/${enc(nx.v.id)}">
         <div class="thumb">${thumb(nx.v)}${bar(nx.v.id)}</div>
-        <div class="ntxt"><small>🗺️ Roadmap · step ${nx.step} of ${nx.total}</small><b>${esc(nx.s.name)}</b><span>Next: ${esc(nx.v.name)}</span></div></a>`;
+        <div class="ntxt"><small>🗺️ ${esc(nx.r.name)} · step ${nx.step} of ${nx.total}</small><b>${esc(nx.s.name)}</b><span>Next: ${esc(nx.v.name)}</span></div></a>`;
+    }
     const cont = continueList();
     if (cont.length) html += `<section><h2 class="row-h">▶ Continue watching</h2><div class="row">${cont.map(card).join('')}</div></section>`;
     const favV = Object.keys(Store.d.favs).filter(id => isFav(id) && Library.get(id)).map(id => Library.get(id).v);
@@ -512,13 +575,14 @@
     const s = ((Library.data && Library.data.series) || []).find(x => x.id === id);
     if (!s) { app.innerHTML = emptyState('Not found', 'This folder is not in your library.', '#/', 'Back'); return; }
     const d = doneCount(s);
-    const step = rmIds().indexOf(s.id);
+    const inRms = roadmaps().filter(r => r.steps.includes(s.id));
     app.innerHTML = `${s.group ? `<a class="back" href="#/group/${enc(s.group.id)}">‹ ${esc(s.group.name)}</a>` : '<a class="back" href="#/">‹ Library</a>'}
       <h1>${esc(s.name)}</h1>
       <div class="progress-line"><div class="bar wide"><i data-w="${(d / s.videos.length * 100).toFixed(1)}"></i></div><span>${d} of ${s.videos.length} done</span></div>
       <div class="actions">
         <button class="btn ${isFav(s.id) ? 'primary' : 'ghost'}" data-act="toggleFav" data-id="${esc(s.id)}">${favLabel(s.id)}</button>
-        ${step >= 0 ? `<a class="btn ghost" href="#/roadmap">🗺️ Roadmap step ${step + 1}</a>` : `<button class="btn ghost" data-act="rmAdd" data-id="${esc(s.id)}">🗺️ Add to roadmap</button>`}
+        ${inRms.map(r => `<button class="btn ghost" data-act="openRm" data-id="${esc(r.id)}">🗺️ ${esc(r.name)} · step ${r.steps.indexOf(s.id) + 1}</button>`).join('')}
+        ${inRms.length < roadmaps().length || !roadmaps().length ? `<button class="btn ghost" data-act="rmAdd" data-id="${esc(s.id)}">🗺️ Add to roadmap</button>` : ''}
         ${d < s.videos.length ? `<button class="btn ghost" data-act="allDone" data-id="${esc(s.id)}">✓ Mark all done</button>` : ''}
       </div>
       <ul class="list">${s.videos.map(v => videoRow(v, v.sub)).join('')}</ul>`;
@@ -526,9 +590,21 @@
   }
 
   function Roadmap() {
-    const steps = rmSteps();
+    const all = roadmaps(), r = curRoadmap();
+    let html = `<h1>🗺️ Roadmaps</h1>
+      <div class="chips">${all.map(x => `<button class="chip ${r && x.id === r.id ? 'on' : ''}" data-act="openRm" data-id="${esc(x.id)}">${esc(x.name)}</button>`).join('')}
+        <button class="chip add" data-act="newRm">+ New roadmap</button></div>`;
+    if (!r) {
+      app.innerHTML = html + emptyState('No roadmap yet', 'A roadmap is your study order: instructional 1, then 2, then 3. Give it a name like "Leg lock path".')
+        + '<button class="btn primary full" data-act="newRm">+ Create my first roadmap</button>';
+      return;
+    }
+    const steps = rmSteps(r);
     const cur = steps.findIndex(s => !seriesDone(s));
-    let html = `<h1>🗺️ My roadmap</h1><p class="muted small">Your study order. Finish one instructional, then the next one is up.</p>`;
+    html += `<div class="rmhead"><h2>${esc(r.name)}</h2>
+        <button class="ibtn" data-act="renameRm" data-id="${esc(r.id)}" aria-label="Rename roadmap">✎</button>
+        <button class="ibtn" data-act="delRm" data-id="${esc(r.id)}" aria-label="Delete roadmap">🗑</button></div>
+      <p class="muted small">Finish one instructional, then the next one is up.</p>`;
     if (steps.length) {
       html += `<ol class="road">${steps.map((s, i) => {
         const d = doneCount(s), state = seriesDone(s) ? 'done' : i === cur ? 'cur' : 'todo';
@@ -547,22 +623,37 @@
             <button class="ibtn" data-act="rmDel" data-id="${esc(s.id)}" aria-label="Remove">✕</button>
           </div></li>`;
       }).join('')}</ol>`;
-      if (cur < 0) html += `<p class="center-text">🏆 You finished your whole roadmap! Add the next instructional below.</p>`;
+      if (cur < 0) html += `<p class="center-text">🏆 You finished this roadmap! Add the next instructional below.</p>`;
     } else {
-      html += emptyState('No roadmap yet', 'Pick instructionals below in the order you want to study them. Step 1 first.');
+      html += `<p class="muted small">No steps yet. Add instructionals below in the order you want to study them.</p>`;
     }
-    const notIn = ((Library.data && Library.data.series) || []).filter(s => !rmIds().includes(s.id));
+    const myDrills = Store.drills().filter(d => listOf(d) === r.id).sort(drillSort);
+    html += `<h3>📝 Notes for this roadmap</h3>
+      <textarea id="rmNotes" rows="4" placeholder="Goals, ideas, what to focus on…">${esc(r.notes || '')}</textarea><div class="muted small" id="rmNoteState"></div>
+      <h3>🥋 Drills for this roadmap</h3>
+      <div class="addrow"><input id="rmDrillIn" maxlength="200" placeholder="Add a drill…"><button class="btn primary" id="rmDrillAdd">Add</button></div>
+      <ul class="list">${myDrills.map(d => drillRow(d)).join('') || '<li class="muted small">No drills yet.</li>'}</ul>`;
+    const notIn = ((Library.data && Library.data.series) || []).filter(s => !r.steps.includes(s.id));
     if (notIn.length) html += `<h3>➕ Add an instructional</h3>
       <input id="rq" class="search" type="search" placeholder="Search instructionals…"><ul class="list" id="rlist"></ul>`;
     app.innerHTML = html;
     applySizes();
+    let noteTimer = null;
+    $('#rmNotes').addEventListener('input', e => {
+      $('#rmNoteState').textContent = 'Saving…'; clearTimeout(noteTimer);
+      noteTimer = setTimeout(() => { saveRm({ ...Store.d.roadmaps[r.id], notes: e.target.value }); $('#rmNoteState').textContent = 'Saved ✓'; }, 600);
+    });
+    cleanup = () => { if (noteTimer) { clearTimeout(noteTimer); saveRm({ ...Store.d.roadmaps[r.id], notes: $('#rmNotes').value }); } };
+    const addD = () => { const t = $('#rmDrillIn').value.trim(); if (!t) return; addDrill(t, null, null, r.id); Store.save(); route(); };
+    $('#rmDrillAdd').onclick = addD;
+    $('#rmDrillIn').onkeydown = e => { if (e.key === 'Enter') addD(); };
     if (!notIn.length) return;
     const draw = () => {
       const q = $('#rq').value.trim().toLowerCase();
       const words = q.split(/\s+/).filter(Boolean);
       const list = notIn.filter(s => words.every(w => fullName(s).toLowerCase().includes(w))).sort((a, b) => isFav(b.id) - isFav(a.id));
       $('#rlist').innerHTML = list.map(s => `<li class="srow"><span class="dtxt"><b>${isFav(s.id) ? '⭐ ' : ''}${esc(s.name)}</b><small>${s.group ? esc(s.group.name) + ' · ' : ''}${s.videos.length} videos · ${doneCount(s)} done</small></span>
-        <button class="btn ghost sm" data-act="rmAdd" data-id="${esc(s.id)}">+ Add</button></li>`).join('') || '<li class="muted small">No matches.</li>';
+        <button class="btn ghost sm" data-act="rmAdd" data-id="${esc(s.id)}" data-rm="${esc(r.id)}">+ Add</button></li>`).join('') || '<li class="muted small">No matches.</li>';
     };
     $('#rq').addEventListener('input', draw);
     draw();
@@ -687,8 +778,9 @@
       if (r && alive) {
         const b = { id: uid(), itemId: id, t, label: r.text || 'Moment at ' + fmt(t), created: now(), updated: now() };
         Store.d.bookmarks[b.id] = b;
-        if (r.checked) addDrill(b.label, id, t);
-        Store.save(); renderBms(); toast(r.checked ? 'Bookmark + drill saved' : 'Bookmark saved');
+        let msg = 'Bookmark saved';
+        if (r.checked) { const to = await pickList(); if (to) { addDrill(b.label, id, t, to.id); msg = 'Bookmark saved + added to ' + listName(to.id); } }
+        Store.save(); renderBms(); toast(msg);
       }
       if (wasPlaying && alive) v.play().catch(() => {});
     };
@@ -815,24 +907,75 @@
     if (alive) v.src = src;
   }
 
-  function addDrill(text, itemId, t) {
-    const d = { id: uid(), text, itemId: itemId || null, t: t ?? null, done: false, created: now(), updated: now() };
+  function addDrill(text, itemId, t, listId) {
+    const d = { id: uid(), text, itemId: itemId || null, t: t ?? null, listId: listId || null, done: false, created: now(), updated: now() };
     Store.d.drills[d.id] = d;
     return d;
+  }
+  const drillSort = (a, b) => (a.done - b.done) || (b.created - a.created);
+  const vname = itemId => { const e = Library.get(itemId); return e ? e.v.name : 'Video not in library'; };
+  function drillRow(d, showList) {
+    const where = [showList ? listName(listOf(d)) : '', d.itemId ? vname(d.itemId) + (d.t !== null ? ' · ' + fmt(d.t) : '') : ''].filter(Boolean).join(' · ');
+    return `<li class="drow ${d.done ? 'done' : ''}"><button class="check ${d.done ? 'on' : ''}" data-act="toggleDrill" data-id="${esc(d.id)}" aria-label="Done">✓</button>
+      <span class="dtxt">${esc(d.text)}${where ? `<small>${esc(where)}</small>` : ''}</span>
+      ${d.itemId ? `<a class="ibtn" href="#/watch/${enc(d.itemId)}${d.t !== null ? '?t=' + Math.floor(d.t) : ''}" aria-label="Watch">▶</a>` : ''}
+      <button class="ibtn" data-act="moveDrill" data-id="${esc(d.id)}" aria-label="Move to another list">⇄</button>
+      <button class="ibtn" data-act="delDrill" data-id="${esc(d.id)}" aria-label="Delete">🗑</button></li>`;
+  }
+
+  // A named note that isn't tied to a video.
+  function NotePage(id) {
+    const n = Store.d.snotes[id];
+    if (!n || n.deleted) { location.hash = '#/study?tab=notes'; return; }
+    app.innerHTML = `<a class="back" href="#/study?tab=notes">‹ Notes</a>
+      <input id="nTitle" class="search title-in" maxlength="120" placeholder="Note name" value="${esc(n.title)}">
+      <textarea id="nText" rows="14" placeholder="Write anything: game plan, competition notes, ideas…">${esc(n.text)}</textarea>
+      <div class="rowbetween"><span class="muted small" id="nState">${ago(n.updated)}</span><button class="btn danger sm" id="nDel">Delete note</button></div>`;
+    let timer = null;
+    const save = () => { timer = null; Store.d.snotes[id] = { ...Store.d.snotes[id], title: $('#nTitle').value.trim() || 'Untitled note', text: $('#nText').value, updated: now() }; Store.save(); $('#nState').textContent = 'Saved ✓'; };
+    const later = () => { $('#nState').textContent = 'Saving…'; clearTimeout(timer); timer = setTimeout(save, 600); };
+    $('#nTitle').addEventListener('input', later);
+    $('#nText').addEventListener('input', later);
+    $('#nDel').onclick = () => {
+      if (!confirm('Delete this note?')) return;
+      clearTimeout(timer); timer = null;
+      const before = Store.d.snotes[id];
+      Store.d.snotes[id] = { ...before, deleted: true, updated: now() }; Store.save();
+      location.hash = '#/study?tab=notes';
+      toast('Note deleted', { label: 'Undo', fn: () => { Store.d.snotes[id] = { ...before, deleted: false, updated: now() }; Store.save(); route(); } });
+    };
+    cleanup = () => { if (timer) { clearTimeout(timer); save(); } };
+    if (!n.text && n.title === 'Untitled note') { $('#nTitle').select(); $('#nTitle').focus(); }
   }
 
   // #10 search, #11 drill list, plus all notes
   function Study(tab) {
     const tabs = [['bookmarks', '🔖 Bookmarks'], ['notes', '📝 Notes'], ['drills', '🥋 Drills']];
+    // Which drill list is open: 'all', 'general', or a list/roadmap id.
+    let dl = sessionStorage.getItem('bjj.dl') || 'all';
+    if (dl !== 'all' && dl !== 'general' && !allLists().some(l => l.id === dl)) dl = 'all';
+    const dlId = dl === 'all' || dl === 'general' ? null : dl;
+    const ownList = dlId && Store.d.dlists[dlId];
+    let top = '';
+    if (tab === 'drills') {
+      top = `<div class="chips">
+          <button class="chip ${dl === 'all' ? 'on' : ''}" data-act="selDl" data-id="all">All</button>
+          ${allLists().map(l => { const v = l.id === null ? 'general' : l.id; return `<button class="chip ${dl === v ? 'on' : ''}" data-act="selDl" data-id="${esc(v)}">${esc(l.name)}</button>`; }).join('')}
+          <button class="chip add" data-act="newList">+ New list</button></div>
+        ${ownList ? `<div class="rmhead"><h2>${esc(ownList.name)}</h2><button class="ibtn" data-act="renameList" data-id="${esc(dlId)}" aria-label="Rename list">✎</button><button class="ibtn" data-act="delList" data-id="${esc(dlId)}" aria-label="Delete list">🗑</button></div>` : ''}
+        ${dlId && Store.d.roadmaps[dlId] ? `<p class="small"><a class="link" href="#/roadmap" data-act="openRm" data-id="${esc(dlId)}">Open this roadmap ›</a></p>` : ''}
+        <div class="addrow"><input id="drillIn" maxlength="200" placeholder="Add a move to ${esc(dl === 'all' ? 'General' : listName(dlId))}…"><button class="btn primary" id="drillAdd">Add</button></div>`;
+    } else if (tab === 'notes') {
+      top = `<button class="btn primary full" id="newNote">+ New note</button>`;
+    }
     app.innerHTML = `<h1>Study</h1>
       <div class="seg">${tabs.map(([k, l]) => `<a href="#/study?tab=${k}" class="${k === tab ? 'on' : ''}">${l}</a>`).join('')}</div>
-      ${tab === 'drills' ? `<div class="addrow"><input id="drillIn" maxlength="200" placeholder="Add a move to practice…"><button class="btn primary" id="drillAdd">Add</button></div>` : ''}
+      ${top}
       <input id="q" class="search" type="search" placeholder="Search ${tab}… (e.g. kimura)" value="${esc(sessionStorage.getItem('bjj.q') || '')}">
       <div id="studyList"></div>`;
     const draw = () => {
       const q = $('#q').value.trim().toLowerCase();
       sessionStorage.setItem('bjj.q', $('#q').value);
-      const vname = itemId => { const e = Library.get(itemId); return e ? e.v.name : 'Video not in library'; };
       const match = (...xs) => !q || xs.some(x => String(x || '').toLowerCase().includes(q));
       let html = '';
       if (tab === 'bookmarks') {
@@ -843,29 +986,35 @@
             <button class="ibtn" data-act="delBm" data-id="${esc(b.id)}" aria-label="Delete">🗑</button></li>`).join('')}</ul>`
           : emptyState(q ? 'No matches' : 'No bookmarks yet', q ? 'Try another word.' : 'While watching, tap 🔖 Mark to save a moment.');
       } else if (tab === 'notes') {
-        const list = Object.entries(Store.d.notes).filter(([k, n]) => !n.deleted && n.text.trim() && match(n.text, vname(k))).sort((a, b) => b[1].updated - a[1].updated);
-        html = list.length ? `<ul class="list">${list.map(([k, n]) => `
-          <li class="srow note"><a href="#/watch/${enc(k)}"><b>${esc(vname(k))}</b><p>${esc(n.text)}</p><small>${ago(n.updated)}</small></a></li>`).join('')}</ul>`
-          : emptyState(q ? 'No matches' : 'No notes yet', q ? 'Try another word.' : 'Write notes under any video.');
+        // Your named notes, roadmap notes and video notes, newest first.
+        const items = [
+          ...Object.values(Store.d.snotes).filter(n => !n.deleted).map(n => ({ href: '#/note/' + enc(n.id), title: '📄 ' + n.title, text: n.text, updated: n.updated })),
+          ...roadmaps().filter(r => (r.notes || '').trim()).map(r => ({ href: '#/roadmap', act: r.id, title: '🗺️ ' + r.name, text: r.notes, updated: r.updated })),
+          ...Object.entries(Store.d.notes).filter(([, n]) => !n.deleted && n.text.trim()).map(([k, n]) => ({ href: '#/watch/' + enc(k), title: '🎬 ' + vname(k), text: n.text, updated: n.updated })),
+        ].filter(x => match(x.title, x.text)).sort((a, b) => b.updated - a.updated);
+        html = items.length ? `<ul class="list">${items.map(x => `
+          <li class="srow note"><a href="${x.href}" ${x.act ? `data-act="openRm" data-id="${esc(x.act)}"` : ''}><b>${esc(x.title)}</b>${x.text ? `<p>${esc(x.text)}</p>` : ''}<small>${ago(x.updated)}</small></a></li>`).join('')}</ul>`
+          : emptyState(q ? 'No matches' : 'No notes yet', q ? 'Try another word.' : 'Tap "+ New note", or write notes under any video.');
       } else {
-        const list = Store.drills().filter(d => match(d.text, d.itemId && vname(d.itemId))).sort((a, b) => (a.done - b.done) || (b.created - a.created));
+        const inView = d => dl === 'all' || (dl === 'general' ? listOf(d) === null : listOf(d) === dlId);
+        const list = Store.drills().filter(d => inView(d) && match(d.text, d.itemId && vname(d.itemId), listName(listOf(d)))).sort(drillSort);
         const doneN = list.filter(d => d.done).length;
-        html = list.length ? `<ul class="list">${list.map(d => `
-          <li class="drow ${d.done ? 'done' : ''}"><button class="check ${d.done ? 'on' : ''}" data-act="toggleDrill" data-id="${esc(d.id)}" aria-label="Done">✓</button>
-            <span class="dtxt">${esc(d.text)}${d.itemId ? `<small>${esc(vname(d.itemId))}${d.t !== null ? ' · ' + fmt(d.t) : ''}</small>` : ''}</span>
-            ${d.itemId ? `<a class="ibtn" href="#/watch/${enc(d.itemId)}${d.t !== null ? '?t=' + Math.floor(d.t) : ''}" aria-label="Watch">▶</a>` : ''}
-            <button class="ibtn" data-act="delDrill" data-id="${esc(d.id)}" aria-label="Delete">🗑</button></li>`).join('')}</ul>
+        html = list.length ? `<ul class="list">${list.map(d => drillRow(d, dl === 'all')).join('')}</ul>
             ${doneN ? `<button class="btn ghost full" data-act="clearDrills">Clear ${doneN} finished</button>` : ''}`
-          : emptyState(q ? 'No matches' : 'Drill list is empty', q ? 'Try another word.' : 'Add moves you want to practice this week.');
+          : emptyState(q ? 'No matches' : 'This list is empty', q ? 'Try another word.' : 'Add moves you want to practice.');
       }
       $('#studyList').innerHTML = html;
     };
     $('#q').addEventListener('input', draw);
     if (tab === 'drills') {
-      const add = () => { const t = $('#drillIn').value.trim(); if (!t) return; addDrill(t); Store.save(); $('#drillIn').value = ''; draw(); };
+      const add = () => { const t = $('#drillIn').value.trim(); if (!t) return; addDrill(t, null, null, dlId); Store.save(); $('#drillIn').value = ''; draw(); };
       $('#drillAdd').onclick = add;
       $('#drillIn').onkeydown = e => { if (e.key === 'Enter') add(); };
     }
+    if (tab === 'notes') $('#newNote').onclick = () => {
+      const n = { id: uid(), title: 'Untitled note', text: '', created: now(), updated: now() };
+      Store.d.snotes[n.id] = n; Store.save(); location.hash = '#/note/' + enc(n.id);
+    };
     refresh = draw;
     draw();
   }
@@ -947,22 +1096,68 @@
       if (s && confirm(`Mark all ${s.videos.length} videos in "${s.name}" as done?`)) { s.videos.forEach(v => setDone(v.id, true)); route(); }
       return;
     } else if (act === 'rmAdd') {
-      if (!rmIds().includes(id)) setRoadmap([...rmIds(), id]);
-      toast(`Added as roadmap step ${rmIds().length} 🗺️`); route(); return;
+      const r = b.dataset.rm ? Store.d.roadmaps[b.dataset.rm] : await pickRoadmap('Add to which roadmap?');
+      if (!r) return;
+      if (!r.steps.includes(id)) saveRm({ ...r, steps: [...r.steps, id] });
+      toast(`Added to "${r.name}" as step ${Store.d.roadmaps[r.id].steps.length} 🗺️`); route(); return;
     } else if (act === 'rmUp' || act === 'rmDown' || act === 'rmDel') {
-      const ids = [...rmIds()], i = ids.indexOf(id);
+      const r = curRoadmap();
+      if (!r) return;
+      const ids = [...r.steps], i = ids.indexOf(id);
       if (i < 0) return;
       if (act === 'rmDel') {
-        const before = [...ids]; ids.splice(i, 1); setRoadmap(ids);
-        toast('Removed from roadmap', { label: 'Undo', fn: () => { setRoadmap(before); route(); } });
+        const before = [...ids]; ids.splice(i, 1); saveRm({ ...r, steps: ids });
+        toast('Removed from roadmap', { label: 'Undo', fn: () => { saveRm({ ...Store.d.roadmaps[r.id], steps: before }); route(); } });
       } else {
         const j = act === 'rmUp' ? i - 1 : i + 1;
         if (j < 0 || j >= ids.length) return;
-        [ids[i], ids[j]] = [ids[j], ids[i]]; setRoadmap(ids);
+        [ids[i], ids[j]] = [ids[j], ids[i]]; saveRm({ ...r, steps: ids });
       }
       route(); return;
+    } else if (act === 'openRm') {
+      localStorage.setItem('bjj.rm', id);
+      if (location.hash === '#/roadmap') route(); else location.hash = '#/roadmap';
+      return;
+    } else if (act === 'newRm') {
+      const r = await ask({ title: 'Name your roadmap', placeholder: 'e.g. Leg lock path, Guard game', okLabel: 'Create' });
+      if (r) { newRoadmap(r.text || 'My roadmap'); toast('Roadmap created 🗺️'); if (location.hash === '#/roadmap') route(); else location.hash = '#/roadmap'; }
+      return;
+    } else if (act === 'renameRm') {
+      const cur = Store.d.roadmaps[id], r = await ask({ title: 'Rename roadmap', value: cur.name });
+      if (r && r.text) saveRm({ ...cur, name: r.text });
+      route(); return;
+    } else if (act === 'delRm') {
+      const cur = Store.d.roadmaps[id];
+      if (!confirm(`Delete the roadmap "${cur.name}"? Its drills move to General. Your videos and progress are not touched.`)) return;
+      saveRm({ ...cur, deleted: true });
+      toast('Roadmap deleted', { label: 'Undo', fn: () => { saveRm({ ...Store.d.roadmaps[id], deleted: false }); localStorage.setItem('bjj.rm', id); route(); } });
+      route(); return;
+    } else if (act === 'selDl') { sessionStorage.setItem('bjj.dl', id); route(); return; }
+    else if (act === 'newList') {
+      const r = await ask({ title: 'Name your drill list', placeholder: 'e.g. This week, Guard drills', okLabel: 'Create' });
+      if (r) {
+        const l = { id: uid(), name: r.text || 'New list', created: now(), updated: now() };
+        Store.d.dlists[l.id] = l; Store.save(); sessionStorage.setItem('bjj.dl', l.id); toast('List created 🥋');
+      }
+      route(); return;
+    } else if (act === 'renameList') {
+      const l = Store.d.dlists[id], r = await ask({ title: 'Rename list', value: l.name });
+      if (r && r.text) { Store.d.dlists[id] = { ...l, name: r.text, updated: now() }; Store.save(); }
+      route(); return;
+    } else if (act === 'delList') {
+      const l = Store.d.dlists[id];
+      if (!confirm(`Delete the list "${l.name}"? Its drills move to General.`)) return;
+      Store.d.dlists[id] = { ...l, deleted: true, updated: now() }; Store.save(); sessionStorage.setItem('bjj.dl', 'all');
+      toast('List deleted', { label: 'Undo', fn: () => { Store.d.dlists[id] = { ...l, deleted: false, updated: now() }; Store.save(); sessionStorage.setItem('bjj.dl', id); route(); } });
+      route(); return;
+    } else if (act === 'moveDrill') {
+      const d = Store.d.drills[id], to = await pickList();
+      if (to) { Store.d.drills[id] = { ...d, listId: to.id, updated: now() }; Store.save(); toast('Moved to ' + listName(to.id)); }
     }
-    else if (act === 'drillBm' && bm) { addDrill(bm.label, bm.itemId, bm.t); Store.save(); toast('Added to drill list 🥋'); }
+    else if (act === 'drillBm' && bm) {
+      const to = await pickList();
+      if (to) { addDrill(bm.label, bm.itemId, bm.t, to.id); Store.save(); toast('Added to ' + listName(to.id) + ' 🥋'); }
+    }
     else if (act === 'renameBm' && bm) {
       const r = await ask({ title: 'Rename bookmark', value: bm.label });
       if (r && r.text) { Store.d.bookmarks[id] = { ...bm, label: r.text, updated: now() }; Store.save(); }

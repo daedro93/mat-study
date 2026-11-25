@@ -141,6 +141,20 @@ textarea { width: 100%; border-radius: 12px; border: 1px solid var(--line); back
 .card small { margin-top: 2px; }
 a.vrow { color: inherit; }
 
+/* chips (pick a list / roadmap) */
+.chips { display: flex; gap: 8px; overflow-x: auto; padding: 2px 0 10px; scrollbar-width: none; }
+.chips::-webkit-scrollbar { display: none; }
+.chip { flex: none; min-height: 40px; padding: 6px 14px; border-radius: 99px; border: 1px solid var(--line); background: var(--bg2); font-size: .9rem; white-space: nowrap; }
+.chip.on { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); font-weight: 600; }
+.chip.add { border-style: dashed; color: var(--muted); }
+.rmhead { display: flex; align-items: center; gap: 4px; margin: 6px 0 2px; }
+.rmhead h2 { flex: 1; min-width: 0; font-size: 1.2rem; overflow-wrap: anywhere; }
+.title-in { font-size: 1.15rem; font-weight: 700; margin: 6px 0 10px; }
+.rowbetween { display: flex; justify-content: space-between; align-items: center; margin-top: 10px; }
+.choices { display: flex; flex-direction: column; gap: 0; max-height: 55vh; overflow-y: auto; }
+.choices .btn { margin: 4px 0; justify-content: flex-start; }
+.link { color: var(--accent); font-weight: 600; }
+
 /* roadmap */
 .next-card { display: flex; gap: 12px; align-items: center; padding: 12px; margin-bottom: 16px; border-radius: 14px; background: var(--bg2); border: 1px solid var(--accent); }
 .next-card .thumb { width: 120px; flex: none; }

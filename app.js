@@ -46,6 +46,15 @@
     const h = Math.round(m / 60);
     return h < 24 ? h + ' h ago' : Math.round(h / 24) + ' days ago';
   }
+  // Run fn over items, at most `limit` at a time, keeping the original order.
+  async function mapLimit(items, limit, fn) {
+    const out = new Array(items.length);
+    let next = 0;
+    await Promise.all(Array.from({ length: Math.min(limit, items.length) }, async () => {
+      while (next < items.length) { const k = next++; out[k] = await fn(items[k], k); }
+    }));
+    return out;
+  }
   function decodeJwt(t) {
     const p = t.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
     return JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(p), c => c.charCodeAt(0))));
@@ -147,6 +156,10 @@
     if (!url.startsWith(GRAPH + '/')) throw new Error('Blocked request to unexpected address'); // never send the token elsewhere
     const r = await fetch(url, { ...opts, headers: { Authorization: 'Bearer ' + await Auth.token(), ...(opts.headers || {}) } });
     if (r.status === 401 && retry) { const t = Auth.tokens; if (t) Auth.tokens = { ...t, exp: 0 }; return graph(path, opts, false); }
+    if ((r.status === 429 || r.status === 503) && retry) { // OneDrive says "slow down": wait, then try once more
+      await new Promise(res => setTimeout(res, Math.min(30, +r.headers.get('Retry-After') || 3) * 1000));
+      return graph(path, opts, false);
+    }
     if (r.status === 404) return null;
     if (!r.ok) throw new Error('OneDrive error ' + r.status);
     return r.status === 204 ? null : r.json();
@@ -249,18 +262,30 @@
             else if (isVideo(k)) out.push(mapVid(k, prefix));
           }
         };
+        // Layout: BJJ folder / Instructor folder / Instructional folder / (Vol folders) / videos.
+        // A top folder that only holds videos is an instructional by itself.
+        // A top folder with sub-folders is an instructor (group); each sub-folder is one instructional.
         const series = [], loose = [];
-        let n = 0;
+        let found = 0;
+        const step = add => { found += add; if (onStep) onStep(found); };
         for (const it of (await listChildren(st.rootId)).sort(natural)) {
-          if (it.folder) {
+          if (!it.folder) { if (isVideo(it)) loose.push(mapVid(it, '')); continue; }
+          const kids = (await listChildren(it.id)).sort(natural);
+          const direct = kids.filter(isVideo).map(k => mapVid(k, ''));
+          const subs = kids.filter(k => k.folder);
+          if (!subs.length) { if (direct.length) { series.push({ id: it.id, name: it.name, group: null, videos: direct }); step(direct.length); } continue; }
+          const group = { id: it.id, name: it.name };
+          const inner = await mapLimit(subs, 6, async sf => {
             const vids = [];
-            await collect(it.id, vids, 0, '');
-            if (vids.length) series.push({ id: it.id, name: it.name, videos: vids });
-            if (onStep) onStep(++n);
-          } else if (isVideo(it)) loose.push(mapVid(it, ''));
+            await collect(sf.id, vids, 0, '');
+            step(vids.length);
+            return vids.length ? { id: sf.id, name: sf.name, group, videos: vids } : null;
+          });
+          if (direct.length) { series.push({ id: it.id, name: it.name + ' (other videos)', group, videos: direct }); step(direct.length); }
+          series.push(...inner.filter(Boolean));
         }
-        if (loose.length) series.unshift({ id: st.rootId, name: st.rootName || 'Videos', videos: loose });
-        this.set({ rootId: st.rootId, scannedAt: now(), series });
+        if (loose.length) series.unshift({ id: st.rootId, name: st.rootName || 'Videos', group: null, videos: loose });
+        this.set({ v: 2, rootId: st.rootId, scannedAt: now(), series });
       } finally { this.scanning = false; }
     },
   };
@@ -268,11 +293,14 @@
 
   function demoLibrary() {
     const mk = (sid, names) => names.map((n, i) => ({ id: sid + '-' + i, name: n, sub: '', size: 0, thumb: '' }));
+    const jd = { id: 'jd', name: 'John Danaher' }, gr = { id: 'gr', name: 'Gordon Ryan' };
     return {
-      rootId: 'demo', scannedAt: now(), series: [
-        { id: 'g', name: 'Guard Retention System', videos: mk('g', ['Vol 1 - Frames and Distance', 'Vol 2 - Hip Escapes', 'Vol 3 - Inversions', 'Vol 4 - Recovering Guard']) },
-        { id: 'l', name: 'Leg Lock Foundations', videos: mk('l', ['Part 1 - Ashi Garami', 'Part 2 - Heel Hook Mechanics', 'Part 3 - Escapes']) },
-        { id: 'k', name: 'Kimura Trap', videos: mk('k', ['Chapter 1 - The Grip', 'Chapter 2 - From Closed Guard']) },
+      v: 2, rootId: 'demo', scannedAt: now(), series: [
+        { id: 'k', name: 'Kimura Trap', group: null, videos: mk('k', ['Chapter 1 - The Grip', 'Chapter 2 - From Closed Guard']) },
+        { id: 'g', name: 'Guard Retention System', group: jd, videos: mk('g', ['Vol 1 - Frames and Distance', 'Vol 2 - Hip Escapes', 'Vol 3 - Inversions', 'Vol 4 - Recovering Guard']) },
+        { id: 'l', name: 'Leg Locks Enter the System', group: jd, videos: mk('l', ['Part 1 - Ashi Garami', 'Part 2 - Heel Hook Mechanics', 'Part 3 - Escapes']) },
+        { id: 'b', name: 'Back Attacks Enter the System', group: jd, videos: mk('b', ['Vol 1 - Back Control', 'Vol 2 - Body Triangle', 'Vol 3 - Strangles']) },
+        { id: 'p', name: 'Systematically Attacking the Guard', group: gr, videos: mk('p', ['Part 1 - Standing Passing', 'Part 2 - Body Lock Pass']) },
       ],
     };
   }
@@ -362,7 +390,7 @@
     const q = new URLSearchParams(qs || '');
     setTab(['study', 'settings', 'roadmap'].includes(parts[0]) ? parts[0] : 'home');
     window.scrollTo(0, 0);
-    const page = { series: () => SeriesPage(parts[1]), watch: () => Watch(parts[1], q.has('t') ? +q.get('t') : null), roadmap: Roadmap,
+    const page = { series: () => SeriesPage(parts[1]), watch: () => Watch(parts[1], q.has('t') ? +q.get('t') : null), roadmap: Roadmap, group: () => GroupPage(parts[1]),
       study: () => Study(q.get('tab') || 'bookmarks'), settings: Settings, pick: () => Picker(parts[1] || 'root') }[parts[0]] || Home;
     Promise.resolve().then(page).catch(fail);
   }
@@ -371,7 +399,7 @@
   function Home() {
     const lib = Library.data;
     if (!Store.d.settings.rootId) { app.innerHTML = emptyState('Pick your BJJ folder', 'Choose the OneDrive folder where your instructionals are. You only do this once.', '#/pick/root', 'Choose folder'); return; }
-    if (!lib || lib.rootId !== Store.d.settings.rootId) { return scanScreen(); }
+    if (!lib || lib.rootId !== Store.d.settings.rootId || lib.v !== 2) { return scanScreen(); }
     if (!lib.series.length) { app.innerHTML = emptyState('No videos found', `There are no MP4 videos in "${Store.d.settings.rootName}".`, '#/pick/root', 'Choose another folder'); return; }
     app.innerHTML = `<input id="vq" class="search" type="search" placeholder="🔍 Search all videos…" value="${esc(sessionStorage.getItem('bjj.vq') || '')}"><div id="homeBody"></div>`;
     const draw = () => {
@@ -395,12 +423,58 @@
     if (cont.length) html += `<section><h2 class="row-h">▶ Continue watching</h2><div class="row">${cont.map(card).join('')}</div></section>`;
     const favV = Object.keys(Store.d.favs).filter(id => isFav(id) && Library.get(id)).map(id => Library.get(id).v);
     if (favV.length) html += `<section><h2 class="row-h">⭐ Favorite videos</h2><div class="row">${favV.map(card).join('')}</div></section>`;
-    const series = [...lib.series].sort((a, b) => isFav(b.id) - isFav(a.id)); // favorite instructionals first
-    for (const s of series) {
-      html += `<section><a class="row-title" href="#/series/${enc(s.id)}"><h2>${isFav(s.id) ? '⭐ ' : ''}${esc(s.name)}</h2><span>${doneCount(s)}/${s.videos.length} ✓ ›</span></a>
-        <div class="row">${s.videos.map(card).join('')}</div></section>`;
+    const favS = lib.series.filter(s => isFav(s.id));
+    if (favS.length) html += `<section><h2 class="row-h">⭐ Favorite instructionals</h2><div class="row">${favS.map(scard).join('')}</div></section>`;
+    // One row per instructor; tap the title to see all their instructionals.
+    for (const g of groups(lib)) {
+      html += g.group
+        ? `<section><a class="row-title" href="#/group/${enc(g.group.id)}"><h2>👤 ${esc(g.group.name)}</h2><span>${g.series.length} instructional${g.series.length === 1 ? '' : 's'} ›</span></a>
+            <div class="row">${g.series.map(scard).join('')}</div></section>`
+        : `<section><h2 class="row-h">📼 Instructionals</h2><div class="row">${g.series.map(scard).join('')}</div></section>`;
     }
     return html;
+  }
+
+  // Groups instructionals by instructor folder, keeping folder order. Stand-alone instructionals come first.
+  function groups(lib) {
+    const out = [], byId = new Map(), solo = { group: null, series: [] };
+    for (const s of lib.series) {
+      if (!s.group) { solo.series.push(s); continue; }
+      if (!byId.has(s.group.id)) { const g = { group: s.group, series: [] }; byId.set(s.group.id, g); out.push(g); }
+      byId.get(s.group.id).series.push(s);
+    }
+    return solo.series.length ? [solo, ...out] : out;
+  }
+  const fullName = s => (s.group ? s.group.name + ' › ' : '') + s.name;
+
+  // A card for a whole instructional (tap → its video list).
+  function scard(s) {
+    const d = doneCount(s), n = s.videos.length;
+    return `<a class="card" href="#/series/${enc(s.id)}">
+      <div class="thumb">${thumb(s.videos[0])}${seriesDone(s) ? '<span class="badge">✓</span>' : ''}<span class="count">${n} videos</span><div class="bar"><i data-w="${(d / n * 100).toFixed(1)}"></i></div></div>
+      <div class="ct">${isFav(s.id) ? '⭐ ' : ''}${esc(s.name)}</div>${d ? `<small>${d}/${n} done</small>` : ''}</a>`;
+  }
+  function srow(s, extra) {
+    const d = doneCount(s), n = s.videos.length;
+    return `<li><a class="vrow vlink" href="#/series/${enc(s.id)}"><div class="thumb sm">${thumb(s.videos[0])}<div class="bar"><i data-w="${(d / n * 100).toFixed(1)}"></i></div></div>
+      <div class="vtxt"><b>${isFav(s.id) ? '⭐ ' : ''}${seriesDone(s) ? '✓ ' : ''}${esc(s.name)}</b>${extra ? `<small>${esc(extra)}</small>` : ''}<small>${n} videos${d ? ` · ${d} done` : ''}</small></div></a></li>`;
+  }
+
+  function GroupPage(id) {
+    const g = Library.data && groups(Library.data).find(x => x.group && x.group.id === id);
+    if (!g) { app.innerHTML = emptyState('Not found', 'This folder is not in your library.', '#/', 'Back'); return; }
+    const total = g.series.reduce((n, s) => n + s.videos.length, 0);
+    app.innerHTML = `<a class="back" href="#/">‹ Library</a><h1>👤 ${esc(g.group.name)}</h1>
+      <p class="muted small">${g.series.length} instructionals · ${total} videos</p>
+      <input id="gq" class="search" type="search" placeholder="Filter ${esc(g.group.name)}'s instructionals…"><ul class="list" id="glist"></ul>`;
+    const draw = () => {
+      const q = $('#gq').value.trim().toLowerCase();
+      const list = g.series.filter(s => !q || s.name.toLowerCase().includes(q)).sort((a, b) => isFav(b.id) - isFav(a.id));
+      $('#glist').innerHTML = list.map(s => srow(s)).join('') || '<li class="muted small">No matches.</li>';
+      applySizes();
+    };
+    $('#gq').addEventListener('input', draw);
+    draw();
   }
 
   function videoRow(v, extra) {
@@ -415,18 +489,22 @@
   // Search every video by its name, sub-folder or instructional name. All words must match.
   function searchResults(q) {
     const words = q.split(/\s+/).filter(Boolean), hits = [];
+    const all = hay => words.every(w => hay.toLowerCase().includes(w));
+    const sHits = Library.data.series.filter(s => all(fullName(s)));
     for (const s of Library.data.series) for (const v of s.videos) {
-      const hay = (v.name + ' ' + v.sub + ' ' + s.name).toLowerCase();
-      if (words.every(w => hay.includes(w))) hits.push({ v, s });
+      if (all(v.name + ' ' + v.sub + ' ' + fullName(s))) hits.push({ v, s });
     }
-    if (!hits.length) return emptyState('No videos found', 'Try a different word, like "guard" or "heel hook".');
-    return `<p class="muted small">${hits.length} video${hits.length === 1 ? '' : 's'}${hits.length > 150 ? ' (showing first 150)' : ''}</p>
-      <ul class="list">${hits.slice(0, 150).map(({ v, s }) => videoRow(v, s.name + (v.sub ? ' · ' + v.sub : ''))).join('')}</ul>`;
+    if (!hits.length && !sHits.length) return emptyState('Nothing found', 'Try a different word, like "guard" or "heel hook".');
+    let html = '';
+    if (sHits.length) html += `<h3>📼 Instructionals (${sHits.length})</h3><ul class="list">${sHits.slice(0, 30).map(s => srow(s, s.group && s.group.name)).join('')}</ul>`;
+    if (hits.length) html += `<h3>🎬 Videos (${hits.length}${hits.length > 150 ? ', showing first 150' : ''})</h3>
+      <ul class="list">${hits.slice(0, 150).map(({ v, s }) => videoRow(v, fullName(s) + (v.sub ? ' · ' + v.sub : ''))).join('')}</ul>`;
+    return html;
   }
 
   async function scanScreen() {
-    app.innerHTML = `<div class="empty"><div class="spinner"></div><h2>Finding your videos…</h2><p id="scanMsg">Looking in "${esc(Store.d.settings.rootName)}"</p></div>`;
-    await Library.scan(n => { const m = $('#scanMsg'); if (m) m.textContent = `Checked ${n} folder${n === 1 ? '' : 's'}…`; });
+    app.innerHTML = `<div class="empty"><div class="spinner"></div><h2>Finding your videos…</h2><p id="scanMsg">Looking in "${esc(Store.d.settings.rootName)}"</p><p class="small">Only names are read, nothing is downloaded. You only wait like this once.</p></div>`;
+    await Library.scan(n => { const m = $('#scanMsg'); if (m) m.textContent = `Found ${n} video${n === 1 ? '' : 's'} so far…`; });
     if (location.hash === '' || location.hash === '#/') route();
   }
 
@@ -435,7 +513,7 @@
     if (!s) { app.innerHTML = emptyState('Not found', 'This folder is not in your library.', '#/', 'Back'); return; }
     const d = doneCount(s);
     const step = rmIds().indexOf(s.id);
-    app.innerHTML = `<a class="back" href="#/">‹ Library</a>
+    app.innerHTML = `${s.group ? `<a class="back" href="#/group/${enc(s.group.id)}">‹ ${esc(s.group.name)}</a>` : '<a class="back" href="#/">‹ Library</a>'}
       <h1>${esc(s.name)}</h1>
       <div class="progress-line"><div class="bar wide"><i data-w="${(d / s.videos.length * 100).toFixed(1)}"></i></div><span>${d} of ${s.videos.length} done</span></div>
       <div class="actions">
@@ -459,7 +537,7 @@
           <div class="dot">${state === 'done' ? '✓' : i + 1}</div>
           <div class="sbody">
             <a href="#/series/${enc(s.id)}"><b>${esc(s.name)}</b>
-              <small>${state === 'cur' ? '▶ Studying now · ' : state === 'done' ? 'Finished · ' : ''}${d}/${s.videos.length} videos</small></a>
+              <small>${s.group ? esc(s.group.name) + ' · ' : ''}${state === 'cur' ? '▶ Studying now · ' : state === 'done' ? 'Finished · ' : ''}${d}/${s.videos.length} videos</small></a>
             <div class="bar wide"><i data-w="${(d / s.videos.length * 100).toFixed(1)}"></i></div>
             ${state === 'cur' && nextV ? `<a class="btn primary sm cont" href="#/watch/${enc(nextV.id)}">▶ Continue: ${esc(nextV.name)}</a>` : ''}
           </div>
@@ -481,8 +559,9 @@
     if (!notIn.length) return;
     const draw = () => {
       const q = $('#rq').value.trim().toLowerCase();
-      const list = notIn.filter(s => !q || s.name.toLowerCase().includes(q)).sort((a, b) => isFav(b.id) - isFav(a.id));
-      $('#rlist').innerHTML = list.map(s => `<li class="srow"><span class="dtxt"><b>${isFav(s.id) ? '⭐ ' : ''}${esc(s.name)}</b><small>${s.videos.length} videos · ${doneCount(s)} done</small></span>
+      const words = q.split(/\s+/).filter(Boolean);
+      const list = notIn.filter(s => words.every(w => fullName(s).toLowerCase().includes(w))).sort((a, b) => isFav(b.id) - isFav(a.id));
+      $('#rlist').innerHTML = list.map(s => `<li class="srow"><span class="dtxt"><b>${isFav(s.id) ? '⭐ ' : ''}${esc(s.name)}</b><small>${s.group ? esc(s.group.name) + ' · ' : ''}${s.videos.length} videos · ${doneCount(s)} done</small></span>
         <button class="btn ghost sm" data-act="rmAdd" data-id="${esc(s.id)}">+ Add</button></li>`).join('') || '<li class="muted small">No matches.</li>';
     };
     $('#rq').addEventListener('input', draw);
@@ -522,7 +601,7 @@
       </div>
       <div class="watch-info">
         <h1>${esc(vid.name)}</h1>
-        <div class="muted">${esc(series.name)}${vid.sub ? ' · ' + esc(vid.sub) : ''}</div>
+        <a class="muted" href="#/series/${enc(series.id)}">${esc(fullName(series))}${vid.sub ? ' · ' + esc(vid.sub) : ''} ›</a>
         <div class="actions">
           <button class="btn ${isDone(id) ? 'primary' : 'ghost'}" id="doneBtn">${isDone(id) ? '✓ Done' : 'Mark as done'}</button>
           <button class="btn ${isFav(id) ? 'primary' : 'ghost'}" id="favBtn">${favLabel(id)}</button>

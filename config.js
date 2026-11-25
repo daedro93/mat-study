@@ -5,5 +5,5 @@ window.BJJ_CONFIG = {
 
   // Step 2: after your first sign-in, the page shows an "owner code". Paste it here.
   // From then on, the page only opens for your Microsoft account.
-  OWNER_HASH: '',
+  OWNER_HASH: '5c196f42c2498ce18d6d376cadacb07f',
 };

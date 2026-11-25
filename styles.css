@@ -137,6 +137,29 @@ textarea { width: 100%; border-radius: 12px; border: 1px solid var(--line); back
 .dtxt { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .drow.done .dtxt { text-decoration: line-through; color: var(--muted); }
 
+/* roadmap */
+.next-card { display: flex; gap: 12px; align-items: center; padding: 12px; margin-bottom: 16px; border-radius: 14px; background: var(--bg2); border: 1px solid var(--accent); }
+.next-card .thumb { width: 120px; flex: none; }
+.ntxt { display: flex; flex-direction: column; min-width: 0; }
+.ntxt b { font-size: 1rem; }
+.ntxt span { font-size: .88rem; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.road { list-style: none; margin: 8px 0 0; padding: 0; position: relative; }
+.step { display: flex; gap: 12px; align-items: flex-start; padding: 12px 0; position: relative; }
+.step:not(:last-child)::after { content: ''; position: absolute; left: 17px; top: 50px; bottom: -12px; width: 2px; background: var(--line); }
+.dot { flex: none; width: 36px; height: 36px; border-radius: 50%; display: grid; place-items: center; font-weight: 700; background: var(--bg3); border: 2px solid var(--line); z-index: 1; }
+.step.cur .dot { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
+.step.done .dot { background: transparent; border-color: var(--accent); color: var(--accent); }
+.step.done b { color: var(--muted); }
+.sbody { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.sbody b { font-weight: 600; }
+.step.cur { background: var(--bg2); border-radius: 14px; padding: 12px 8px; margin: 4px -8px; }
+.cont { align-self: flex-start; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; line-height: 28px; }
+.sbtns { display: flex; flex-direction: column; flex: none; }
+.sbtns .ibtn { height: 34px; min-width: 40px; }
+.ibtn:disabled { opacity: .25; }
+.center-text { text-align: center; margin: 16px 0; }
+.tabbar a { font-size: .74rem; }
+
 /* settings */
 .panel { background: var(--bg2); border: 1px solid var(--line); border-radius: 14px; padding: 4px 16px 16px; margin-bottom: 14px; }
 .panel h3 { margin-top: 14px; }

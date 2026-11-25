@@ -166,7 +166,7 @@
   }
 
   // ---------- your data (progress, bookmarks, notes, drills)
-  const blank = () => ({ progress: {}, notes: {}, bookmarks: {}, drills: {}, settings: { updated: 0 } });
+  const blank = () => ({ progress: {}, notes: {}, bookmarks: {}, drills: {}, favs: {}, roadmap: { steps: [], updated: 0 }, settings: { updated: 0 } });
   const Store = {
     d: Object.assign(blank(), readJSON('bjj.data.v1', {})),
     save() { writeJSON('bjj.data.v1', this.d); Sync.schedule(); },
@@ -182,7 +182,8 @@
   function merge(a, b) {
     return {
       progress: mergeMap(a.progress, b.progress), notes: mergeMap(a.notes, b.notes),
-      bookmarks: mergeMap(a.bookmarks, b.bookmarks), drills: mergeMap(a.drills, b.drills),
+      bookmarks: mergeMap(a.bookmarks, b.bookmarks), drills: mergeMap(a.drills, b.drills), favs: mergeMap(a.favs, b.favs),
+      roadmap: ((b.roadmap || {}).updated || 0) > ((a.roadmap || {}).updated || 0) ? b.roadmap : (a.roadmap || { steps: [], updated: 0 }),
       settings: ((b.settings || {}).updated || 0) > ((a.settings || {}).updated || 0) ? b.settings : a.settings,
     };
   }
@@ -223,13 +224,15 @@
   const Library = {
     data: readJSON('bjj.library', null),
     index: new Map(),
+    byId: new Map(),
     scanning: false,
     set(d) { this.data = d; writeJSON('bjj.library', d); this.reindex(); },
     reindex() {
-      this.index.clear();
-      for (const s of (this.data && this.data.series) || []) s.videos.forEach((v, i) => this.index.set(v.id, { v, s, i }));
+      this.index.clear(); this.byId.clear();
+      for (const s of (this.data && this.data.series) || []) { this.byId.set(s.id, s); s.videos.forEach((v, i) => this.index.set(v.id, { v, s, i })); }
     },
     get(id) { return this.index.get(id); },
+    series(id) { return this.byId.get(id); },
     async scan(onStep) {
       const st = Store.d.settings;
       if (!st.rootId || this.scanning) return;
@@ -283,6 +286,26 @@
     Store.d.progress[id] = { ...p, done, t: done ? p.t : 0, updated: now() };
     Store.save();
   }
+  const doneCount = s => s.videos.filter(v => isDone(v.id)).length;
+  const seriesDone = s => s.videos.length > 0 && doneCount(s) === s.videos.length;
+
+  // ---------- favorites (videos and instructionals share one list)
+  const isFav = id => !!(Store.d.favs[id] && Store.d.favs[id].on);
+  function toggleFav(id) { Store.d.favs[id] = { on: !isFav(id), updated: now() }; Store.save(); return isFav(id); }
+  const favLabel = id => isFav(id) ? '⭐ Favorite' : '☆ Favorite';
+
+  // ---------- roadmap (your study order of instructionals)
+  const rmIds = () => Store.d.roadmap.steps || [];
+  function setRoadmap(steps) { Store.d.roadmap = { steps, updated: now() }; Store.save(); }
+  const rmSteps = () => rmIds().map(id => Library.series(id)).filter(Boolean);
+  function roadmapNext() {
+    const steps = rmSteps();
+    const i = steps.findIndex(s => !seriesDone(s));
+    if (i < 0) return null;
+    const s = steps[i];
+    return { s, v: s.videos.find(v => !isDone(v.id)), step: i + 1, total: steps.length };
+  }
+
   function continueList() {
     const recent = Object.entries(Store.d.progress)
       .filter(([id]) => Library.get(id))
@@ -337,9 +360,9 @@
     const [path, qs] = location.hash.slice(1).split('?');
     const parts = (path || '/').split('/').filter(Boolean).map(decodeURIComponent);
     const q = new URLSearchParams(qs || '');
-    setTab(parts[0] === 'study' || parts[0] === 'settings' ? parts[0] : 'home');
+    setTab(['study', 'settings', 'roadmap'].includes(parts[0]) ? parts[0] : 'home');
     window.scrollTo(0, 0);
-    const page = { series: () => SeriesPage(parts[1]), watch: () => Watch(parts[1], q.has('t') ? +q.get('t') : null),
+    const page = { series: () => SeriesPage(parts[1]), watch: () => Watch(parts[1], q.has('t') ? +q.get('t') : null), roadmap: Roadmap,
       study: () => Study(q.get('tab') || 'bookmarks'), settings: Settings, pick: () => Picker(parts[1] || 'root') }[parts[0]] || Home;
     Promise.resolve().then(page).catch(fail);
   }
@@ -350,16 +373,55 @@
     if (!Store.d.settings.rootId) { app.innerHTML = emptyState('Pick your BJJ folder', 'Choose the OneDrive folder where your instructionals are. You only do this once.', '#/pick/root', 'Choose folder'); return; }
     if (!lib || lib.rootId !== Store.d.settings.rootId) { return scanScreen(); }
     if (!lib.series.length) { app.innerHTML = emptyState('No videos found', `There are no MP4 videos in "${Store.d.settings.rootName}".`, '#/pick/root', 'Choose another folder'); return; }
+    app.innerHTML = `<input id="vq" class="search" type="search" placeholder="🔍 Search all videos…" value="${esc(sessionStorage.getItem('bjj.vq') || '')}"><div id="homeBody"></div>`;
+    const draw = () => {
+      const q = $('#vq').value.trim().toLowerCase();
+      sessionStorage.setItem('bjj.vq', $('#vq').value);
+      $('#homeBody').innerHTML = q ? searchResults(q) : homeRows(lib);
+      applySizes();
+    };
+    $('#vq').addEventListener('input', draw);
+    refresh = draw;
+    draw();
+  }
+
+  function homeRows(lib) {
     let html = '';
+    const nx = roadmapNext();
+    if (nx) html += `<a class="next-card" href="#/watch/${enc(nx.v.id)}">
+        <div class="thumb">${thumb(nx.v)}${bar(nx.v.id)}</div>
+        <div class="ntxt"><small>🗺️ Roadmap · step ${nx.step} of ${nx.total}</small><b>${esc(nx.s.name)}</b><span>Next: ${esc(nx.v.name)}</span></div></a>`;
     const cont = continueList();
     if (cont.length) html += `<section><h2 class="row-h">▶ Continue watching</h2><div class="row">${cont.map(card).join('')}</div></section>`;
-    for (const s of lib.series) {
-      const d = s.videos.filter(v => isDone(v.id)).length;
-      html += `<section><a class="row-title" href="#/series/${enc(s.id)}"><h2>${esc(s.name)}</h2><span>${d}/${s.videos.length} ✓ ›</span></a>
+    const favV = Object.keys(Store.d.favs).filter(id => isFav(id) && Library.get(id)).map(id => Library.get(id).v);
+    if (favV.length) html += `<section><h2 class="row-h">⭐ Favorite videos</h2><div class="row">${favV.map(card).join('')}</div></section>`;
+    const series = [...lib.series].sort((a, b) => isFav(b.id) - isFav(a.id)); // favorite instructionals first
+    for (const s of series) {
+      html += `<section><a class="row-title" href="#/series/${enc(s.id)}"><h2>${isFav(s.id) ? '⭐ ' : ''}${esc(s.name)}</h2><span>${doneCount(s)}/${s.videos.length} ✓ ›</span></a>
         <div class="row">${s.videos.map(card).join('')}</div></section>`;
     }
-    app.innerHTML = html;
-    applySizes();
+    return html;
+  }
+
+  function videoRow(v, extra) {
+    const p = prog(v.id);
+    return `<li class="vrow ${isDone(v.id) ? 'done' : ''}">
+      <a class="vlink" href="#/watch/${enc(v.id)}"><div class="thumb sm">${thumb(v)}${bar(v.id)}</div>
+        <div class="vtxt"><b>${isFav(v.id) ? '⭐ ' : ''}${esc(v.name)}</b>${extra ? `<small>${esc(extra)}</small>` : ''}<small>${p && p.d ? fmt(p.t) + ' / ' + fmt(p.d) : 'Not started'}</small></div></a>
+      <button class="check ${isDone(v.id) ? 'on' : ''}" data-act="toggleDone" data-id="${esc(v.id)}" aria-label="Mark done">✓</button>
+    </li>`;
+  }
+
+  // Search every video by its name, sub-folder or instructional name. All words must match.
+  function searchResults(q) {
+    const words = q.split(/\s+/).filter(Boolean), hits = [];
+    for (const s of Library.data.series) for (const v of s.videos) {
+      const hay = (v.name + ' ' + v.sub + ' ' + s.name).toLowerCase();
+      if (words.every(w => hay.includes(w))) hits.push({ v, s });
+    }
+    if (!hits.length) return emptyState('No videos found', 'Try a different word, like "guard" or "heel hook".');
+    return `<p class="muted small">${hits.length} video${hits.length === 1 ? '' : 's'}${hits.length > 150 ? ' (showing first 150)' : ''}</p>
+      <ul class="list">${hits.slice(0, 150).map(({ v, s }) => videoRow(v, s.name + (v.sub ? ' · ' + v.sub : ''))).join('')}</ul>`;
   }
 
   async function scanScreen() {
@@ -371,17 +433,60 @@
   function SeriesPage(id) {
     const s = ((Library.data && Library.data.series) || []).find(x => x.id === id);
     if (!s) { app.innerHTML = emptyState('Not found', 'This folder is not in your library.', '#/', 'Back'); return; }
-    const d = s.videos.filter(v => isDone(v.id)).length;
+    const d = doneCount(s);
+    const step = rmIds().indexOf(s.id);
     app.innerHTML = `<a class="back" href="#/">‹ Library</a>
       <h1>${esc(s.name)}</h1>
       <div class="progress-line"><div class="bar wide"><i data-w="${(d / s.videos.length * 100).toFixed(1)}"></i></div><span>${d} of ${s.videos.length} done</span></div>
-      <ul class="list">${s.videos.map(v => `
-        <li class="vrow ${isDone(v.id) ? 'done' : ''}">
-          <a class="vlink" href="#/watch/${enc(v.id)}"><div class="thumb sm">${thumb(v)}${bar(v.id)}</div>
-            <div class="vtxt"><b>${esc(v.name)}</b>${v.sub ? `<small>${esc(v.sub)}</small>` : ''}<small>${prog(v.id) && prog(v.id).d ? fmt(prog(v.id).t) + ' / ' + fmt(prog(v.id).d) : 'Not started'}</small></div></a>
-          <button class="check ${isDone(v.id) ? 'on' : ''}" data-act="toggleDone" data-id="${esc(v.id)}" aria-label="Mark done">✓</button>
-        </li>`).join('')}</ul>`;
+      <div class="actions">
+        <button class="btn ${isFav(s.id) ? 'primary' : 'ghost'}" data-act="toggleFav" data-id="${esc(s.id)}">${favLabel(s.id)}</button>
+        ${step >= 0 ? `<a class="btn ghost" href="#/roadmap">🗺️ Roadmap step ${step + 1}</a>` : `<button class="btn ghost" data-act="rmAdd" data-id="${esc(s.id)}">🗺️ Add to roadmap</button>`}
+        ${d < s.videos.length ? `<button class="btn ghost" data-act="allDone" data-id="${esc(s.id)}">✓ Mark all done</button>` : ''}
+      </div>
+      <ul class="list">${s.videos.map(v => videoRow(v, v.sub)).join('')}</ul>`;
     applySizes();
+  }
+
+  function Roadmap() {
+    const steps = rmSteps();
+    const cur = steps.findIndex(s => !seriesDone(s));
+    let html = `<h1>🗺️ My roadmap</h1><p class="muted small">Your study order. Finish one instructional, then the next one is up.</p>`;
+    if (steps.length) {
+      html += `<ol class="road">${steps.map((s, i) => {
+        const d = doneCount(s), state = seriesDone(s) ? 'done' : i === cur ? 'cur' : 'todo';
+        const nextV = s.videos.find(v => !isDone(v.id));
+        return `<li class="step ${state}">
+          <div class="dot">${state === 'done' ? '✓' : i + 1}</div>
+          <div class="sbody">
+            <a href="#/series/${enc(s.id)}"><b>${esc(s.name)}</b>
+              <small>${state === 'cur' ? '▶ Studying now · ' : state === 'done' ? 'Finished · ' : ''}${d}/${s.videos.length} videos</small></a>
+            <div class="bar wide"><i data-w="${(d / s.videos.length * 100).toFixed(1)}"></i></div>
+            ${state === 'cur' && nextV ? `<a class="btn primary sm cont" href="#/watch/${enc(nextV.id)}">▶ Continue: ${esc(nextV.name)}</a>` : ''}
+          </div>
+          <div class="sbtns">
+            <button class="ibtn" data-act="rmUp" data-id="${esc(s.id)}" aria-label="Move up" ${i === 0 ? 'disabled' : ''}>↑</button>
+            <button class="ibtn" data-act="rmDown" data-id="${esc(s.id)}" aria-label="Move down" ${i === steps.length - 1 ? 'disabled' : ''}>↓</button>
+            <button class="ibtn" data-act="rmDel" data-id="${esc(s.id)}" aria-label="Remove">✕</button>
+          </div></li>`;
+      }).join('')}</ol>`;
+      if (cur < 0) html += `<p class="center-text">🏆 You finished your whole roadmap! Add the next instructional below.</p>`;
+    } else {
+      html += emptyState('No roadmap yet', 'Pick instructionals below in the order you want to study them. Step 1 first.');
+    }
+    const notIn = ((Library.data && Library.data.series) || []).filter(s => !rmIds().includes(s.id));
+    if (notIn.length) html += `<h3>➕ Add an instructional</h3>
+      <input id="rq" class="search" type="search" placeholder="Search instructionals…"><ul class="list" id="rlist"></ul>`;
+    app.innerHTML = html;
+    applySizes();
+    if (!notIn.length) return;
+    const draw = () => {
+      const q = $('#rq').value.trim().toLowerCase();
+      const list = notIn.filter(s => !q || s.name.toLowerCase().includes(q)).sort((a, b) => isFav(b.id) - isFav(a.id));
+      $('#rlist').innerHTML = list.map(s => `<li class="srow"><span class="dtxt"><b>${isFav(s.id) ? '⭐ ' : ''}${esc(s.name)}</b><small>${s.videos.length} videos · ${doneCount(s)} done</small></span>
+        <button class="btn ghost sm" data-act="rmAdd" data-id="${esc(s.id)}">+ Add</button></li>`).join('') || '<li class="muted small">No matches.</li>';
+    };
+    $('#rq').addEventListener('input', draw);
+    draw();
   }
 
   async function Watch(id, tParam) {
@@ -420,6 +525,7 @@
         <div class="muted">${esc(series.name)}${vid.sub ? ' · ' + esc(vid.sub) : ''}</div>
         <div class="actions">
           <button class="btn ${isDone(id) ? 'primary' : 'ghost'}" id="doneBtn">${isDone(id) ? '✓ Done' : 'Mark as done'}</button>
+          <button class="btn ${isFav(id) ? 'primary' : 'ghost'}" id="favBtn">${favLabel(id)}</button>
           ${next ? `<a class="btn ghost" href="#/watch/${enc(next.id)}">Next video ›</a>` : ''}
         </div>
         <h3>🔖 Bookmarks</h3>
@@ -554,6 +660,11 @@
       clearTimeout(noteTimer);
       noteTimer = setTimeout(() => { Store.d.notes[id] = { text: e.target.value, updated: now() }; Store.save(); $('#noteState').textContent = 'Saved ✓'; }, 600);
     });
+    $('#favBtn').onclick = () => {
+      const on = toggleFav(id), b = $('#favBtn');
+      b.textContent = favLabel(id); b.className = 'btn ' + (on ? 'primary' : 'ghost');
+      toast(on ? 'Added to favorites ⭐' : 'Removed from favorites');
+    };
     $('#doneBtn').onclick = () => {
       setDone(id, !isDone(id));
       const b = $('#doneBtn'); b.textContent = isDone(id) ? '✓ Done' : 'Mark as done'; b.className = 'btn ' + (isDone(id) ? 'primary' : 'ghost');
@@ -751,6 +862,27 @@
     const bm = id && Store.d.bookmarks[id];
     if (act === 'seek' && seekHere) seekHere(+b.dataset.t);
     else if (act === 'toggleDone') { setDone(id, !isDone(id)); route(); return; }
+    else if (act === 'toggleFav') { toast(toggleFav(id) ? 'Added to favorites ⭐' : 'Removed from favorites'); route(); return; }
+    else if (act === 'allDone') {
+      const s = Library.series(id);
+      if (s && confirm(`Mark all ${s.videos.length} videos in "${s.name}" as done?`)) { s.videos.forEach(v => setDone(v.id, true)); route(); }
+      return;
+    } else if (act === 'rmAdd') {
+      if (!rmIds().includes(id)) setRoadmap([...rmIds(), id]);
+      toast(`Added as roadmap step ${rmIds().length} 🗺️`); route(); return;
+    } else if (act === 'rmUp' || act === 'rmDown' || act === 'rmDel') {
+      const ids = [...rmIds()], i = ids.indexOf(id);
+      if (i < 0) return;
+      if (act === 'rmDel') {
+        const before = [...ids]; ids.splice(i, 1); setRoadmap(ids);
+        toast('Removed from roadmap', { label: 'Undo', fn: () => { setRoadmap(before); route(); } });
+      } else {
+        const j = act === 'rmUp' ? i - 1 : i + 1;
+        if (j < 0 || j >= ids.length) return;
+        [ids[i], ids[j]] = [ids[j], ids[i]]; setRoadmap(ids);
+      }
+      route(); return;
+    }
     else if (act === 'drillBm' && bm) { addDrill(bm.label, bm.itemId, bm.t); Store.save(); toast('Added to drill list 🥋'); }
     else if (act === 'renameBm' && bm) {
       const r = await ask({ title: 'Rename bookmark', value: bm.label });

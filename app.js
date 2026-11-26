@@ -375,23 +375,63 @@
         }
         if (loose.length) series.unshift({ id: st.rootId, name: st.rootName || 'Videos', group: null, videos: loose });
         this.set({ v: 2, rootId: st.rootId, scannedAt: now(), series });
-        // Load chapters from any new or changed table-of-contents files. A file you added by hand wins.
-        let changed = false;
-        await mapLimit([...tocs].filter(([sid, k]) => {
-          const old = Store.d.toc[sid];
-          return !(old && !old.deleted && old.src === 'file') && !(old && old.fileId === k.id && old.mod === k.lastModifiedDateTime);
-        }), 4, async ([sid, k]) => {
-          try {
-            const url = k['@microsoft.graph.downloadUrl'] || ((await graph(`/me/drive/items/${enc(k.id)}`)) || {})['@microsoft.graph.downloadUrl'];
-            if (!url) return;
-            const p = parseToc(await (await fetch(url)).text());
-            if (!Object.keys(p.vols).length) return;
-            Store.d.toc[sid] = { ...p, src: 'auto', file: k.name, fileId: k.id, mod: k.lastModifiedDateTime, updated: now() };
-            changed = true;
-          } catch (e) { console.warn('toc', k.name, e); }
-        });
-        if (changed) Store.save();
+        await this.loadTocs(tocs);
       } finally { this.scanning = false; }
+    },
+    // Load chapters from new or changed table-of-contents files. A file you added by hand wins.
+    async loadTocs(tocs) {
+      let added = 0;
+      await mapLimit([...tocs].filter(([sid, k]) => {
+        const old = Store.d.toc[sid];
+        return !(old && !old.deleted && old.src === 'file') && !(old && !old.deleted && old.fileId === k.id && old.mod === k.lastModifiedDateTime);
+      }), 4, async ([sid, k]) => {
+        try {
+          const url = k['@microsoft.graph.downloadUrl'] || ((await graph(`/me/drive/items/${enc(k.id)}`)) || {})['@microsoft.graph.downloadUrl'];
+          if (!url) return;
+          const p = parseToc(await (await fetch(url)).text());
+          if (!Object.keys(p.vols).length) return;
+          Store.d.toc[sid] = { ...p, src: 'auto', file: k.name, fileId: k.id, mod: k.lastModifiedDateTime, updated: now() };
+          added++;
+        } catch (e) { console.warn('toc', k.name, e); }
+      });
+      if (added) Store.save();
+      return added;
+    },
+    // Quick chapter-file check: asks OneDrive search for .html files instead of opening every folder.
+    async findTocs() {
+      const st = Store.d.settings, lib = this.data;
+      if (!lib || !st.rootId) return { found: 0, added: 0 };
+      if (DEMO) return { found: 0, added: 0 };
+      const sids = new Set(lib.series.map(s => s.id));
+      let files = [];
+      try {
+        let url = `/me/drive/items/${enc(st.rootId)}/search(q='html')?$top=200`;
+        while (url) { const j = await graph(url); if (!j) break; files.push(...j.value.filter(isToc)); url = j['@odata.nextLink']; }
+      } catch (e) { console.warn('toc search', e); files = []; }
+      // Which instructional each file belongs to: walk up its folders until we reach one.
+      const up = new Map();
+      const seriesOf = async (pid, depth = 0) => {
+        if (!pid || depth > 6 || pid === st.rootId) return null;
+        if (sids.has(pid)) return pid;
+        if (!up.has(pid)) { const it = await graph(`/me/drive/items/${enc(pid)}?$select=id,parentReference`); up.set(pid, it && it.parentReference && it.parentReference.id); }
+        return seriesOf(up.get(pid), depth + 1);
+      };
+      const tocs = new Map();
+      for (const f of files.sort(natural)) {
+        const sid = await seriesOf(f.parentReference && f.parentReference.id);
+        if (sid && !tocs.has(sid)) tocs.set(sid, f);
+      }
+      // Search can miss brand-new files for a few minutes; then look inside each instructional folder instead.
+      if (!files.length) {
+        const look = async (folderId, sid, depth) => {
+          for (const k of await listChildren(folderId)) {
+            if (k.folder && depth < 4) await look(k.id, sid, depth + 1);
+            else if (isToc(k) && !tocs.has(sid)) tocs.set(sid, k);
+          }
+        };
+        await mapLimit(lib.series.filter(s => !/ \(other videos\)$/.test(s.name)), 6, s => look(s.id, s.id, 0));
+      }
+      return { found: tocs.size, added: await this.loadTocs(tocs) };
     },
   };
   Library.reindex();
@@ -831,7 +871,7 @@
     if (!toc || toc.deleted) {
       return `<div class="panel tocp"><h3>📑 Chapters</h3>
         <p class="small muted">Add this instructional's table-of-contents file (.html) to see chapters under each video.
-        Or put the file in this instructional's OneDrive folder and tap <b>Rescan</b> in Settings.</p>
+        Or put the file in this instructional's OneDrive folder and tap <b>📑 Find chapter files</b> in Settings.</p>
         <button class="btn ghost" data-toc="add">📑 Add table of contents</button>${input}</div>`;
     }
     const map = tocMap(s), missing = s.videos.filter(v => !map.has(v.id));
@@ -1501,7 +1541,8 @@
     app.innerHTML = `<h1>Settings</h1>
       <div class="panel"><h3>📁 Library</h3>
         <p>Folder: <b>${esc(Store.d.settings.rootName || 'not chosen')}</b><br><span class="muted small">${count} videos · checked ${ago(lib && lib.scannedAt)}</span></p>
-        <div class="btns"><a class="btn ghost" href="#/pick/root">Change folder</a><button class="btn ghost" id="rescan">Rescan for new videos</button></div></div>
+        <div class="btns"><a class="btn ghost" href="#/pick/root">Change folder</a><button class="btn ghost" id="rescan">Rescan for new videos</button><button class="btn ghost" id="findToc">📑 Find chapter files</button></div>
+        <p class="small muted">"Find chapter files" only looks for table-of-contents (.html) files, so it's much faster than a full rescan.</p></div>
       <div class="panel"><h3>📱 App</h3>
         ${standalone ? '<p>Installed on your home screen ✓</p>' : installEvt ? '<button class="btn primary" id="install">Add to home screen</button>' : '<p class="small">To add it to your home screen: in Chrome tap <b>⋮</b> then <b>Add to Home screen</b>.</p>'}
         <div class="btns"><button class="btn ghost" id="theme">${theme === 'dark' ? '☀️ Light mode' : '🌙 Dark mode'}</button></div></div>
@@ -1520,7 +1561,16 @@
         </ul>
         ${DEMO ? '' : `<p class="small">Signed in as <b>${esc(t.name || 'you')}</b></p><button class="btn danger" id="signout">Sign out</button>`}</div>`;
     $('#rescan').onclick = async () => { const b = $('#rescan'); b.disabled = true; b.textContent = 'Scanning…'; try { await Library.scan(); toast('Library updated ✓'); } catch (e) { fail(e); return; } route(); };
-    $('#theme').onclick = () => { localStorage.setItem('bjj.theme', theme === 'dark' ? 'light' : 'dark'); applyTheme(); route(); };
+    $('#findToc').onclick = async () => {
+      const b = $('#findToc'); b.disabled = true; b.textContent = 'Looking…';
+      try {
+        const r = await Library.findTocs();
+        toast(!r.found ? 'No chapter files found. Put the .html file inside the instructional folder.'
+          : r.added ? `📑 Added chapters to ${r.added} instructional${r.added > 1 ? 's' : ''}` : `Found ${r.found} chapter file${r.found > 1 ? 's' : ''}, all already loaded ✓`);
+      } catch (e) { fail(e); }
+      b.disabled = false; b.textContent = '📑 Find chapter files';
+    };
+    $('#theme').onclick =() => { localStorage.setItem('bjj.theme', theme === 'dark' ? 'light' : 'dark'); applyTheme(); route(); };
     $('#syncNow').onclick = async () => { Sync.dirty = true; await Sync.run(); toast(Sync.failed ? 'Backup failed, will retry' : 'Backed up ✓'); route(); };
     $('#export').onclick = () => {
       const a = document.createElement('a');

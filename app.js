@@ -12,7 +12,10 @@
   const AUTH_BASE = 'https://login.microsoftonline.com/consumers/oauth2/v2.0';
   const GRAPH = 'https://graph.microsoft.com/v1.0';
   // Read-only access to files + one private app folder for your bookmarks/notes.
-  const SCOPES = 'openid profile offline_access Files.Read Files.ReadWrite.AppFolder';
+  const BASE_SCOPES = 'openid profile offline_access Files.Read Files.ReadWrite.AppFolder';
+  // "Read files shared with me" is only asked for when someone uses a shared-folder link.
+  const wantsShared = () => localStorage.getItem('bjj.sharedScope') === '1';
+  const scopes = () => BASE_SCOPES + (wantsShared() ? ' Files.Read.All' : '');
   const REDIRECT_URI = location.origin + location.pathname.replace(/index\.html$/, '');
   const DATA_PATH = '/me/drive/special/approot:/bjj-data.json';
   const SPEEDS = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2];
@@ -239,12 +242,14 @@
   const Auth = {
     get tokens() { return readJSON('bjj.tokens', null); },
     set tokens(v) { v ? writeJSON('bjj.tokens', v) : localStorage.removeItem('bjj.tokens'); },
-    async login(selectAccount) {
+    hasShared() { return /Files\.Read\.All/i.test((this.tokens || {}).scope || ''); },
+    async login(selectAccount, shared) {
+      if (shared) localStorage.setItem('bjj.sharedScope', '1');
       const verifier = b64url(crypto.getRandomValues(new Uint8Array(32)));
       const state = b64url(crypto.getRandomValues(new Uint8Array(16)));
       sessionStorage.setItem('bjj.pkce', JSON.stringify({ verifier, state, back: location.hash }));
       const p = new URLSearchParams({
-        client_id: CFG.CLIENT_ID, response_type: 'code', redirect_uri: REDIRECT_URI, scope: SCOPES,
+        client_id: CFG.CLIENT_ID, response_type: 'code', redirect_uri: REDIRECT_URI, scope: scopes(),
         code_challenge: b64url(await sha256(verifier)), code_challenge_method: 'S256', state, response_mode: 'query',
       });
       if (selectAccount) p.set('prompt', 'select_account');
@@ -256,16 +261,20 @@
       const saved = JSON.parse(sessionStorage.getItem('bjj.pkce') || 'null');
       sessionStorage.removeItem('bjj.pkce');
       history.replaceState(null, '', REDIRECT_URI + ((saved && saved.back) || ''));
-      if (q.has('error')) throw new Error(q.get('error_description') || q.get('error'));
+      if (q.has('error')) {
+        // Said no to the extra permission: go back to the normal permissions.
+        if (wantsShared() && !this.hasShared()) localStorage.removeItem('bjj.sharedScope');
+        throw new Error(q.get('error_description') || q.get('error'));
+      }
       if (!saved || saved.state !== q.get('state')) throw new Error('Sign-in check failed. Please try again.');
       await this.tokenRequest({ grant_type: 'authorization_code', code: q.get('code'), redirect_uri: REDIRECT_URI, code_verifier: saved.verifier });
     },
     async tokenRequest(params) {
-      const r = await fetch(AUTH_BASE + '/token', { method: 'POST', body: new URLSearchParams({ client_id: CFG.CLIENT_ID, scope: SCOPES, ...params }) });
+      const r = await fetch(AUTH_BASE + '/token', { method: 'POST', body: new URLSearchParams({ client_id: CFG.CLIENT_ID, scope: scopes(), ...params }) });
       const j = await r.json();
       if (!r.ok) { const e = new Error(j.error_description || j.error); e.code = j.error || 'error'; throw e; }
       const old = this.tokens || {};
-      const t = { access: j.access_token, exp: now() + j.expires_in * 1000, refresh: j.refresh_token || old.refresh, oid: old.oid, name: old.name };
+      const t = { access: j.access_token, exp: now() + j.expires_in * 1000, refresh: j.refresh_token || old.refresh, oid: old.oid, name: old.name, scope: j.scope || old.scope || '' };
       if (j.id_token) { const c = decodeJwt(j.id_token); t.oid = c.oid || c.sub; t.name = c.name || c.preferred_username || ''; }
       this.tokens = t;
     },
@@ -299,15 +308,18 @@
     if (!r.ok) throw new Error('OneDrive error ' + r.status);
     return r.status === 204 ? null : r.json();
   }
-  async function listChildren(id) {
+  // Your library can live in your OneDrive, or in a folder someone shared with you (another drive).
+  const driveBase = () => (Store.d.settings.driveId ? `/drives/${enc(Store.d.settings.driveId)}` : '/me/drive');
+  const itemPath = (id, base = driveBase()) => `${base}/items/${enc(id)}`;
+  async function listChildren(id, base) {
     const out = [];
-    let url = `/me/drive/items/${enc(id)}/children?$top=200&$expand=thumbnails`;
+    let url = `${itemPath(id, base)}/children?$top=200&$expand=thumbnails`;
     while (url) { const j = await graph(url); if (!j) break; out.push(...j.value); url = j['@odata.nextLink']; }
     return out;
   }
   async function videoUrl(id) {
     if (DEMO) return 'demo/sample.mp4';
-    const it = await graph(`/me/drive/items/${enc(id)}`);
+    const it = await graph(itemPath(id));
     const u = it && it['@microsoft.graph.downloadUrl'];
     if (!u) throw new Error('Could not open this video in OneDrive.');
     return u;
@@ -474,7 +486,7 @@
       try {
       await mapLimit(todo, 4, async ([sid, k]) => {
         try {
-          const url = k['@microsoft.graph.downloadUrl'] || ((await graph(`/me/drive/items/${enc(k.id)}`)) || {})['@microsoft.graph.downloadUrl'];
+          const url = k['@microsoft.graph.downloadUrl'] || ((await graph(itemPath(k.id))) || {})['@microsoft.graph.downloadUrl'];
           if (!url) { this.tocFailed++; return; }
           const r = await fetch(url, { credentials: 'omit' });
           if (!r.ok) throw new Error('download ' + r.status);
@@ -502,17 +514,32 @@
         if (DEMO) { for (let i = 1; i <= 8; i++) { await new Promise(r => setTimeout(r, 250)); chk(); p.folders = i * 180; this.emit(); } return { found: 0, added: 0 }; }
         const sids = new Set(lib.series.map(s => s.id));
         const parent = new Map(), files = [];
-        let url = `/me/drive/items/${enc(st.rootId)}/delta?$select=id,name,file,folder,size,parentReference,lastModifiedDateTime,deleted`;
-        while (url) {
-          chk();
-          const j = await graph(url); if (!j) break;
-          for (const it of j.value || []) {
-            if (it.deleted) continue;
-            if (it.parentReference && it.parentReference.id) parent.set(it.id, it.parentReference.id);
-            if (isToc(it)) files.push(it);
+        const note = it => {
+          if (it.deleted) return;
+          if (it.parentReference && it.parentReference.id) parent.set(it.id, it.parentReference.id);
+          if (isToc(it)) files.push(it);
+        };
+        try {
+          let url = `${itemPath(st.rootId)}/delta?$select=id,name,file,folder,size,parentReference,lastModifiedDateTime,deleted`;
+          while (url) {
+            chk();
+            const j = await graph(url); if (!j) break;
+            (j.value || []).forEach(note);
+            p.folders += (j.value || []).length; p.found = files.length; this.emit();
+            url = j['@odata.nextLink'];
           }
-          p.folders += (j.value || []).length; p.found = files.length; this.emit();
-          url = j['@odata.nextLink'];
+        } catch (e) {
+          if (e instanceof ScanStopped) throw e;
+          // The quick list isn't available (e.g. some shared folders): open each instructional folder instead.
+          console.warn('delta', e);
+          const walk = async (id, depth) => {
+            for (const k of await listChildren(id)) {
+              chk(); note({ ...k, parentReference: { id } }); p.folders++;
+              if (k.folder && depth < 4) await walk(k.id, depth + 1);
+            }
+            this.emit();
+          };
+          await mapLimit(lib.series.filter(s => !/ \(other videos\)$/.test(s.name)), 6, s => walk(s.id, 0));
         }
         chk();
         // Which instructional each file belongs to: climb its folders until one is an instructional.
@@ -1721,12 +1748,16 @@
 
   async function Picker(folderId) {
     if (DEMO) {
-      app.innerHTML = `<h1>Choose folder</h1><p class="muted">Demo mode: loads sample folders.</p><button class="btn primary full" id="use">Use demo folder</button>`;
+      app.innerHTML = `<div class="panel sharep"><h3>🔗 Use a folder someone shared with you</h3>
+        <p class="small muted">Paste the OneDrive link they sent you. You only do this once.</p>
+        <div class="addrow"><input id="shareUrl" type="url" placeholder="https://1drv.ms/…"><button class="btn primary" id="shareGo">Use link</button></div></div>
+        <h1>Choose folder</h1><p class="muted">Demo mode: loads sample folders.</p><button class="btn primary full" id="use">Use demo folder</button>`;
+      $('#shareGo').onclick = () => toast(isShareLink($('#shareUrl').value) ? 'Demo mode: shared links only work when signed in.' : 'Paste the OneDrive link, like https://1drv.ms/…');
       $('#use').onclick = () => { Store.d.settings = { rootId: 'demo', rootName: 'Demo', updated: now() }; Store.save(); Library.set(demoLibrary()); location.hash = '#/'; };
       return;
     }
     app.innerHTML = '<div class="center"><div class="spinner"></div></div>';
-    const [me, kids] = await Promise.all([graph(`/me/drive/items/${enc(folderId)}`), listChildren(folderId)]);
+    const [me, kids] = await Promise.all([graph(itemPath(folderId, '/me/drive')), listChildren(folderId, '/me/drive')]);
     const name = folderId === 'root' ? 'My files' : (me ? me.name : 'Folder');
     const parent = folderId !== 'root' && me && me.parentReference && me.parentReference.id;
     const folders = kids.filter(k => k.folder).sort(natural);
@@ -1739,9 +1770,47 @@
       ${vids ? `<p class="muted small">${vids} video${vids === 1 ? '' : 's'} directly in this folder.</p>` : ''}`;
     const use = $('#use');
     if (use) use.onclick = () => {
-      Store.d.settings = { ...Store.d.settings, rootId: folderId, rootName: name, updated: now() };
+      Store.d.settings = { ...Store.d.settings, rootId: folderId, rootName: name, driveId: null, shared: false, updated: now() };
       Store.save(); Library.set(null); location.hash = '#/';
     };
+    if (folderId === 'root') {
+      app.insertAdjacentHTML('afterbegin', `<div class="panel sharep"><h3>🔗 Use a folder someone shared with you</h3>
+        <p class="small muted">Paste the OneDrive link they sent you. You only do this once.</p>
+        <div class="addrow"><input id="shareUrl" type="url" inputmode="url" autocomplete="off" placeholder="https://1drv.ms/…"><button class="btn primary" id="shareGo">Use link</button></div></div>`);
+      const go = () => useShareLink($('#shareUrl').value);
+      $('#shareGo').onclick = go;
+      $('#shareUrl').onkeydown = e => { if (e.key === 'Enter') go(); };
+      const pending = sessionStorage.getItem('bjj.pendingShare');
+      if (pending && Auth.hasShared()) { sessionStorage.removeItem('bjj.pendingShare'); $('#shareUrl').value = pending; go(); }
+    }
+  }
+  // Opens a OneDrive share link and makes that folder your library. Reading shared folders needs
+  // one extra permission ("read files shared with me"), asked for here only, once.
+  const isShareLink = s => { try { const u = new URL(s.trim()); return u.protocol === 'https:' && /(^|\.)(1drv\.ms|onedrive\.live\.com|onedrive\.com|sharepoint\.com)$/i.test(u.hostname); } catch { return false; } };
+  async function useShareLink(link) {
+    link = (link || '').trim();
+    if (!isShareLink(link)) { toast('Paste the OneDrive link, like https://1drv.ms/…'); return; }
+    if (!Auth.hasShared()) {
+      sessionStorage.setItem('bjj.pendingShare', link);
+      toast('Microsoft will ask you to allow "read files shared with you". It is still read-only.');
+      setTimeout(() => Auth.login(false, true), 1200);
+      return;
+    }
+    const b = $('#shareGo'); if (b) { b.disabled = true; b.textContent = '…'; }
+    try {
+      const id = 'u!' + btoa(String.fromCharCode(...new TextEncoder().encode(link))).replace(/=+$/, '').replace(/\//g, '_').replace(/\+/g, '-');
+      const it = await graph(`/shares/${id}/driveItem`, { headers: { Prefer: 'redeemSharingLink' } });
+      if (!it) { toast("Couldn't open that link. Ask your friend to check it's shared with your account."); return; }
+      if (!it.folder) { toast('That link is to a single file. Ask for a link to the folder instead.'); return; }
+      const driveId = it.parentReference && it.parentReference.driveId;
+      if (!driveId) { toast("Couldn't open that folder."); return; }
+      Store.d.settings = { ...Store.d.settings, rootId: it.id, rootName: it.name, driveId, shared: true, shareLink: link, updated: now() };
+      Store.save(); Library.set(null); toast(`📁 Using "${it.name}"`); location.hash = '#/';
+    } catch (e) {
+      if (e instanceof NeedLogin) return fail(e);
+      console.warn('share', e);
+      toast(/403/.test(e.message) ? "That link isn't shared with this Microsoft account." : "Couldn't open that link. Check it and try again.");
+    } finally { const bb = $('#shareGo'); if (bb) { bb.disabled = false; bb.textContent = 'Use link'; } }
   }
 
   function Settings() {
@@ -1752,7 +1821,7 @@
     const standalone = matchMedia('(display-mode: standalone)').matches;
     app.innerHTML = `<h1>Settings</h1>
       <div class="panel"><h3>📁 Library</h3>
-        <p>Folder: <b>${esc(Store.d.settings.rootName || 'not chosen')}</b><br><span class="muted small">${count} videos · checked ${ago(lib && lib.scannedAt)}</span></p>
+        <p>Folder: <b>${esc(Store.d.settings.rootName || 'not chosen')}</b>${Store.d.settings.shared ? ' <span class="muted small">(🔗 shared with you)</span>' : ''}<br><span class="muted small">${count} videos · checked ${ago(lib && lib.scannedAt)}</span></p>
         <div class="btns"><a class="btn ghost" href="#/pick/root">Change folder</a><button class="btn ghost" id="rescan">Rescan for new videos</button><button class="btn ghost" id="findToc">📑 Find chapter files</button></div>
         <div id="scanBox"></div>
         <p class="small muted">"Find chapter files" only looks for table-of-contents (.html) files, so it's much faster than a full rescan.</p></div>
@@ -1965,9 +2034,12 @@
       <button class="btn primary" id="copy">Copy code</button>`);
     $('#copy').onclick = () => navigator.clipboard.writeText(code).then(() => toast('Copied ✓'));
   }
-  function screenBlocked() {
-    gate(`<div class="big-emoji">⛔</div><h2>Private app</h2><p>This app only works for its owner's Microsoft account.</p>
+  function screenBlocked(code) {
+    gate(`<div class="big-emoji">⛔</div><h2>Private app</h2><p>This app only works for accounts its owner has invited.</p>
+      ${code ? `<p class="small">If the owner invited you, send them this code. Once they add it, sign in again.</p>
+      <code class="owner">${esc(code)}</code><button class="btn primary" id="copy">Copy code</button>` : ''}
       <button class="btn ghost" id="other">Use a different account</button>`);
+    if (code) $('#copy').onclick = () => navigator.clipboard.writeText(code).then(() => toast('Copied ✓'));
     $('#other').onclick = () => Auth.login(true);
   }
 
@@ -1982,7 +2054,9 @@
       if (!t || !t.oid) return screenSignIn();
       const code = await ownerCode(t.oid);
       if (!CFG.OWNER_HASH) return screenOwner(code);
-      if (code !== CFG.OWNER_HASH) { Auth.tokens = null; return screenBlocked(); }
+      // Only you (OWNER_HASH) and anyone you invited (FRIEND_HASHES) can get in.
+      const allowed = code === CFG.OWNER_HASH || (Array.isArray(CFG.FRIEND_HASHES) && CFG.FRIEND_HASHES.includes(code));
+      if (!allowed) { Auth.tokens = null; return screenBlocked(code); }
     }
     showTabs(true);
     window.addEventListener('hashchange', route);

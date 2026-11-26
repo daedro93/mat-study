@@ -748,6 +748,7 @@
           <div class="tap l" data-z="l"></div><div class="tap r" data-z="r"></div>
           <div class="flash" id="flash"></div>
           <div class="vmsg" id="vmsg">Loading video…</div>
+          <div class="upnext" id="upnext" hidden></div>
         </div>
         <div class="ctl" id="ctl">
           <div class="seekwrap"><div class="marks" id="marks"></div><input type="range" id="seek" min="0" max="1000" value="0" aria-label="Seek"></div>
@@ -764,6 +765,8 @@
             <button class="tool" id="loop"><span>🔁</span><em id="loopTxt">Loop</em></button>
             <button class="tool" id="bm"><span>🔖</span>Mark</button>
             <button class="tool" id="fs"><span>⛶</span><em id="fsTxt">Full</em></button>
+            ${'remote' in HTMLMediaElement.prototype ? '<button class="tool" id="cast"><span>📺</span><em id="castTxt">Cast</em></button>' : ''}
+            ${document.pictureInPictureEnabled ? '<button class="tool" id="pip"><span>🗗</span>Mini</button>' : ''}
           </div>
         </div>
       </div>
@@ -877,6 +880,84 @@
     document.addEventListener('fullscreenchange', onFs);
     pl.addEventListener('pointermove', e => { if (e.pointerType === 'mouse') bumpHide(); });
 
+    // Cast to a TV (Chromecast) with Chrome's built-in Remote Playback
+    const castBtn = $('#cast');
+    if (castBtn) {
+      const castUi = () => {
+        const st = v.remote.state;
+        castBtn.classList.toggle('on', st !== 'disconnected');
+        $('#castTxt').textContent = st === 'connected' ? 'On TV' : st === 'connecting' ? '…' : 'Cast';
+      };
+      castBtn.onclick = () => {
+        bumpHide();
+        v.remote.prompt().catch(e => {
+          if (e.name === 'NotFoundError') toast('No TV found. Make sure your Chromecast is on the same Wi-Fi.');
+          else if (e.name === 'NotSupportedError') toast('Casting is not available for this video here.');
+          else if (e.name !== 'AbortError' && e.name !== 'NotAllowedError') toast('Could not cast: ' + e.message);
+        });
+      };
+      ['connect', 'connecting', 'disconnect'].forEach(ev => v.remote.addEventListener(ev, () => {
+        castUi();
+        if (ev === 'connect') toast('Playing on your TV 📺. The buttons here still control it.');
+        if (ev === 'disconnect' && alive) toast('Stopped casting');
+      }));
+    }
+    // Mini player (picture-in-picture): keep watching while you type notes or switch apps
+    const pipBtn = $('#pip');
+    if (pipBtn) {
+      pipBtn.onclick = async () => {
+        try { if (document.pictureInPictureElement) await document.exitPictureInPicture(); else await v.requestPictureInPicture(); }
+        catch { toast('Mini player is not available right now.'); }
+      };
+      v.addEventListener('enterpictureinpicture', () => pipBtn.classList.add('on'));
+      v.addEventListener('leavepictureinpicture', () => pipBtn.classList.remove('on'));
+    }
+    // Lock-screen and notification controls
+    const ms = 'mediaSession' in navigator ? navigator.mediaSession : null;
+    if (ms) {
+      try {
+        ms.metadata = new MediaMetadata({ title: vid.name, artist: fullName(series), album: 'Mat Study',
+          artwork: [{ src: 'icons/icon-192.png', sizes: '192x192', type: 'image/png' }, { src: 'icons/icon-512.png', sizes: '512x512', type: 'image/png' }] });
+      } catch { /* ignore */ }
+      const prev = series.videos[idx - 1];
+      const handlers = {
+        play: () => v.play().catch(() => {}),
+        pause: () => v.pause(),
+        seekbackward: d => skip(-(d.seekOffset || 10)),
+        seekforward: d => skip(d.seekOffset || 10),
+        seekto: d => { if (isFinite(v.duration)) v.currentTime = d.seekTime; },
+        previoustrack: prev ? () => { location.hash = '#/watch/' + enc(prev.id); } : null,
+        nexttrack: next ? () => { location.hash = '#/watch/' + enc(next.id); } : null,
+      };
+      Object.entries(handlers).forEach(([k, fn]) => { try { ms.setActionHandler(k, fn); } catch { /* not supported */ } });
+    }
+    let lastPos = 0;
+    function updatePos() {
+      if (!ms || !ms.setPositionState || !isFinite(v.duration) || !v.duration) return;
+      try { ms.setPositionState({ duration: v.duration, playbackRate: v.playbackRate || 1, position: Math.min(v.currentTime, v.duration) }); } catch { /* ignore */ }
+    }
+
+    // Auto-play the next video with a 5 second countdown
+    let upTimer = null;
+    function cancelUpNext() { clearInterval(upTimer); upTimer = null; $('#upnext').hidden = true; }
+    function showUpNext() {
+      let n = 5;
+      const box = $('#upnext');
+      box.innerHTML = `<div class="small">Up next in <b id="upN">${n}</b></div><div class="upname">${esc(next.name)}</div>
+        <div class="btns"><button class="btn ghost" id="upCancel">Cancel</button><button class="btn primary" id="upGo">Play now</button></div>`;
+      $('#upCancel').onclick = e => { e.stopPropagation(); cancelUpNext(); };
+      $('#upGo').onclick = e => { e.stopPropagation(); cancelUpNext(); location.hash = '#/watch/' + enc(next.id); };
+      const draw = () => { $('#upN').textContent = n; };
+      box.hidden = false; pl.classList.remove('hidectl');
+      upTimer = setInterval(() => {
+        n -= 1;
+        if (n <= 0) { cancelUpNext(); if (alive) location.hash = '#/watch/' + enc(next.id); }
+        else draw();
+      }, 1000);
+    }
+    v.addEventListener('play', cancelUpNext);
+    v.addEventListener('seeking', () => { if (upTimer) cancelUpNext(); });
+
     // --- seek bar
     seek.addEventListener('input', () => { dragging = true; if (isFinite(v.duration)) { $('#time').textContent = fmt(seek.value / 1000 * v.duration); } bumpHide(); });
     seek.addEventListener('change', () => { dragging = false; if (isFinite(v.duration)) v.currentTime = seek.value / 1000 * v.duration; });
@@ -930,7 +1011,10 @@
       if (!dragging) { seek.value = Math.round(v.currentTime / v.duration * 1000); $('#time').textContent = fmt(v.currentTime); }
       if (loopA !== null && loopB === null) drawMarks();
       if (now() - lastSave > 5000) saveProgress();
+      if (now() - lastPos > 1000) { lastPos = now(); updatePos(); }
     });
+    v.addEventListener('ratechange', updatePos);
+    v.addEventListener('seeked', updatePos);
     v.addEventListener('loadedmetadata', () => {
       $('#dur').textContent = fmt(v.duration);
       if (v.dataset.resumeAt) { v.currentTime = +v.dataset.resumeAt; delete v.dataset.resumeAt; return; }
@@ -946,7 +1030,8 @@
     v.addEventListener('ended', () => {
       saveProgress(); setDone(id, true);
       $('#doneBtn').textContent = '✓ Done'; $('#doneBtn').className = 'btn primary';
-      if (next) toast('Finished! 🎉', { label: 'Next video ›', fn: () => { location.hash = '#/watch/' + enc(next.id); } });
+      if (next && loopA === null && localStorage.getItem('bjj.autoplay') !== 'off') showUpNext();
+      else if (next) toast('Finished! 🎉', { label: 'Next video ›', fn: () => { location.hash = '#/watch/' + enc(next.id); } });
       else toast('Finished this series! 🎉');
     });
     // OneDrive video links expire after a while; quietly get a fresh one and continue.
@@ -971,7 +1056,9 @@
     document.addEventListener('visibilitychange', onHide);
 
     cleanup = () => {
-      alive = false; saveProgress(); clearInterval(loopTimer); clearTimeout(hideTimer); clearTimeout(tapTimer);
+      alive = false; saveProgress(); clearInterval(loopTimer); clearTimeout(hideTimer); clearTimeout(tapTimer); clearInterval(upTimer);
+      if (ms) ['play', 'pause', 'seekbackward', 'seekforward', 'seekto', 'previoustrack', 'nexttrack'].forEach(k => { try { ms.setActionHandler(k, null); } catch { /* ignore */ } });
+      if (ms) ms.metadata = null;
       if (noteTimer) { clearTimeout(noteTimer); Store.d.notes[id] = { text: $('#notes').value, updated: now() }; Store.save(); }
       v.pause(); v.removeAttribute('src'); v.load();
       document.removeEventListener('keydown', onKey);
@@ -1134,7 +1221,8 @@
         <div class="btns"><a class="btn ghost" href="#/pick/root">Change folder</a><button class="btn ghost" id="rescan">Rescan for new videos</button></div></div>
       <div class="panel"><h3>📱 App</h3>
         ${standalone ? '<p>Installed on your home screen ✓</p>' : installEvt ? '<button class="btn primary" id="install">Add to home screen</button>' : '<p class="small">To add it to your home screen: in Chrome tap <b>⋮</b> then <b>Add to Home screen</b>.</p>'}
-        <div class="btns"><button class="btn ghost" id="theme">${theme === 'dark' ? '☀️ Light mode' : '🌙 Dark mode'}</button></div></div>
+        <div class="btns"><button class="btn ghost" id="theme">${theme === 'dark' ? '☀️ Light mode' : '🌙 Dark mode'}</button>
+          <button class="btn ghost" id="autoplay">${localStorage.getItem('bjj.autoplay') === 'off' ? '⏭️ Auto-play next: Off' : '⏭️ Auto-play next: On'}</button></div></div>
       <div class="panel"><h3>🏷️ My custom tags</h3>
         ${customTags().length ? `<ul class="list">${Object.entries(Store.d.tagdefs).filter(([, t]) => !t.deleted).sort((a, b) => a[1].name.localeCompare(b[1].name)).map(([k, t]) => `
           <li class="srow"><a class="dtxt" href="#/tag/${enc(t.name)}">${esc(t.name)}</a><button class="ibtn" data-act="delTag" data-id="${esc(k)}" aria-label="Delete tag">🗑</button></li>`).join('')}</ul>`
@@ -1151,6 +1239,7 @@
         ${DEMO ? '' : `<p class="small">Signed in as <b>${esc(t.name || 'you')}</b></p><button class="btn danger" id="signout">Sign out</button>`}</div>`;
     $('#rescan').onclick = async () => { const b = $('#rescan'); b.disabled = true; b.textContent = 'Scanning…'; try { await Library.scan(); toast('Library updated ✓'); } catch (e) { fail(e); return; } route(); };
     $('#theme').onclick = () => { localStorage.setItem('bjj.theme', theme === 'dark' ? 'light' : 'dark'); applyTheme(); route(); };
+    $('#autoplay').onclick = () => { const off = localStorage.getItem('bjj.autoplay') === 'off'; localStorage.setItem('bjj.autoplay', off ? 'on' : 'off'); toast(off ? 'Auto-play next is on' : 'Auto-play next is off'); route(); };
     $('#syncNow').onclick = async () => { Sync.dirty = true; await Sync.run(); toast(Sync.failed ? 'Backup failed, will retry' : 'Backed up ✓'); route(); };
     $('#export').onclick = () => {
       const a = document.createElement('a');

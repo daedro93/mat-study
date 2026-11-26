@@ -90,6 +90,10 @@ small { display: block; color: var(--muted); font-size: .82rem; }
 .flash { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); padding: 10px 16px; border-radius: 99px; background: rgba(0,0,0,.6); color: #fff; font-weight: 700; opacity: 0; transition: opacity .15s; pointer-events: none; }
 .flash.l { left: 25%; } .flash.r { left: 75%; }
 .flash.show { opacity: 1; }
+.upnext { position: absolute; inset: 0; z-index: 3; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; padding: 12px; background: rgba(0,0,0,.78); color: #fff; text-align: center; }
+.upnext[hidden] { display: none; }
+.upnext .upname { font-weight: 700; max-width: 90%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.upnext .btns { display: flex; gap: 8px; margin-top: 4px; }
 .ctl { background: #0b0c10; color: #fff; padding: 4px 12px 10px; transition: opacity .25s; }
 .seekwrap { position: relative; height: 32px; display: flex; align-items: center; }
 .marks { position: absolute; left: 8px; right: 8px; top: 50%; height: 0; pointer-events: none; z-index: 1; }

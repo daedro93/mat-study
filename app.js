@@ -7,6 +7,7 @@
   if (window.top !== window.self) { document.documentElement.innerHTML = ''; return; }
 
   const CFG = window.BJJ_CONFIG || {};
+  const lang = (window.I18N && window.I18N.lang) || 'en'; // English or Spanish (chosen in Settings)
   const IS_LOCAL = ['localhost', '127.0.0.1'].includes(location.hostname);
   const DEMO = IS_LOCAL && new URLSearchParams(location.search).has('demo');
   const AUTH_BASE = 'https://login.microsoftonline.com/consumers/oauth2/v2.0';
@@ -1010,7 +1011,7 @@
     const d = doneCount(s);
     const inRms = roadmaps().filter(r => r.steps.includes(s.id));
     app.innerHTML = `${s.group ? `<a class="back" href="#/group/${enc(s.group.id)}">‹ ${esc(s.group.name)}</a>` : '<a class="back" href="#/">‹ Library</a>'}
-      <h1>${esc(s.name)}</h1>
+      <h1 translate="no">${esc(s.name)}</h1>
       <div class="progress-line"><div class="bar wide"><i data-w="${(d / s.videos.length * 100).toFixed(1)}"></i></div><span>${d} of ${s.videos.length} done</span></div>
       <div class="actions">
         <button class="btn ${isFav(s.id) ? 'primary' : 'ghost'}" data-act="toggleFav" data-id="${esc(s.id)}">${favLabel(s.id)}</button>
@@ -1232,7 +1233,7 @@
         <div class="sheetwrap" id="sheetwrap" hidden><div class="sheet" id="sheet"></div></div>
       </div>
       <div class="watch-info">
-        <h1>${esc(vid.name)}</h1>
+        <h1 translate="no">${esc(vid.name)}</h1>
         <a class="muted" href="#/series/${enc(series.id)}">${esc(fullName(series))}${vid.sub ? ' · ' + esc(vid.sub) : ''} ›</a>
         ${tagBox(id, series.id)}
         <div class="actions">
@@ -1404,7 +1405,7 @@
       let r;
       try { r = await askBookmark(t); } finally { v.removeEventListener('play', hold); }
       if (r && alive) {
-        const b = { id: uid(), itemId: id, t, label: r.text || 'Moment at ' + fmt(t), created: now(), updated: now() };
+        const b = { id: uid(), itemId: id, t, label: r.text || (lang === 'es' ? 'Momento en ' : 'Moment at ') + fmt(t), created: now(), updated: now() };
         Store.d.bookmarks[b.id] = b;
         let msg = 'Bookmark saved';
         if (r.list) {
@@ -1508,7 +1509,7 @@
     function renderBms() {
       const list = Store.bookmarks().filter(b => b.itemId === id && !b.archived).sort((a, b) => a.t - b.t);
       $('#bmlist').innerHTML = list.length ? list.map(b => `
-        <li class="bmrow"><button class="tbtn" data-act="seek" data-t="${b.t}">${fmt(b.t)}</button><span class="bml">${esc(b.label)}</span>
+        <li class="bmrow"><button class="tbtn" data-act="seek" data-t="${b.t}">${fmt(b.t)}</button><span class="bml" translate="no">${esc(b.label)}</span>
           <button class="ibtn" data-act="drillBm" data-id="${esc(b.id)}" aria-label="Add to drills">+🥋</button>
           ${moreBtn('bm', b.id)}</li>`).join('')
         : '<li class="muted small">No bookmarks yet. Tap 🔖 Mark while watching to save a moment.</li>';
@@ -1827,7 +1828,10 @@
         <p class="small muted">"Find chapter files" only looks for table-of-contents (.html) files, so it's much faster than a full rescan.</p></div>
       <div class="panel"><h3>📱 App</h3>
         ${standalone ? '<p>Installed on your home screen ✓</p>' : installEvt ? '<button class="btn primary" id="install">Add to home screen</button>' : '<p class="small">To add it to your home screen: in Chrome tap <b>⋮</b> then <b>Add to Home screen</b>.</p>'}
-        <div class="btns"><button class="btn ghost" id="theme">${theme === 'dark' ? '☀️ Light mode' : '🌙 Dark mode'}</button></div></div>
+        <div class="btns"><button class="btn ghost" id="theme">${theme === 'dark' ? '☀️ Light mode' : '🌙 Dark mode'}</button></div>
+        <h3>🌐 Language</h3>
+        <div class="btns" translate="no"><button class="btn ${lang === 'en' ? 'primary' : 'ghost'}" data-lang="en">English</button><button class="btn ${lang === 'es' ? 'primary' : 'ghost'}" data-lang="es">Español</button></div>
+        <div class="btns"><a class="btn ghost" href="guide.html#${lang}" target="_blank" rel="noopener">📖 User guide</a></div></div>
       <div class="panel"><h3>🏷️ My custom tags</h3>
         ${customTags().length ? `<ul class="list">${Object.entries(Store.d.tagdefs).filter(([, t]) => !t.deleted).sort((a, b) => a[1].name.localeCompare(b[1].name)).map(([k, t]) => `
           <li class="srow"><a class="dtxt" href="#/tag/${enc(t.name)}">${esc(t.name)}</a><button class="ibtn" data-act="delTag" data-id="${esc(k)}" aria-label="Delete tag">🗑</button></li>`).join('')}</ul>`
@@ -1869,6 +1873,7 @@
           : `Found ${r.found} chapter file${r.found > 1 ? 's' : ''}, all already loaded ✓`);
       } catch (e) { fail(e); }
     };
+    $$('[data-lang]').forEach(b => { b.onclick = () => { if (b.dataset.lang !== lang) window.I18N.set(b.dataset.lang); }; });
     $('#theme').onclick =() => { localStorage.setItem('bjj.theme', theme === 'dark' ? 'light' : 'dark'); applyTheme(); route(); };
     $('#syncNow').onclick = async () => { Sync.dirty = true; await Sync.run(); toast(Sync.failed ? 'Backup failed, will retry' : 'Backed up ✓'); route(); };
     $('#export').onclick = () => {

@@ -313,3 +313,16 @@ a.vrow { color: inherit; }
 .tocor { margin: 14px 0 6px; }
 .archlink { margin-top: 16px; color: var(--muted); }
 .srow.note { align-items: flex-start; }
+
+/* user guide page (guide.html): one language at a time, English unless a Spanish link was opened */
+.guide main { max-width: 760px; padding-bottom: 60px; }
+.guide .lang { display: none; }
+.guide:not(:has(#es:target, #es :target)) #en { display: block; }
+.guide:has(#es:target, #es :target) #es { display: block; }
+.guide h2 { margin-top: 28px; padding-top: 8px; border-top: 1px solid var(--line); scroll-margin-top: 70px; }
+.guide li { margin: 6px 0; line-height: 1.5; }
+.guide ul ul { margin-top: 4px; }
+.guide .toc { display: flex; flex-wrap: wrap; gap: 6px; margin: 12px 0 8px; }
+.guide .toc a { padding: 6px 12px; border-radius: 99px; background: var(--bg2); border: 1px solid var(--line); font-size: .88rem; }
+.guide .note { background: var(--bg2); border-left: 3px solid var(--accent); padding: 10px 14px; border-radius: 8px; }
+.guide .topright .chip { min-height: 32px; padding: 4px 12px; display: inline-flex; align-items: center; }

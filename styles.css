@@ -31,6 +31,8 @@ h3 { font-size: 1rem; margin: 1.4rem 0 .5rem; }
 .scanbox p { margin: 8px 0; }
 .scanbox .bar { background: var(--bg2); }
 .scanbox .bar i { transition: width .3s; }
+.bar.busy i { width: 30%; animation: busy 1.2s ease-in-out infinite alternate; }
+@keyframes busy { from { margin-left: 0; } to { margin-left: 70%; } }
 .netstate { background: var(--danger); color: #fff; border-radius: 99px; padding: 2px 10px; font-size: .8rem; }
 main { padding: 12px 16px; max-width: 960px; margin: 0 auto; }
 

@@ -1,5 +1,5 @@
 // Keeps the app itself available offline. Videos and Microsoft requests are never cached.
-const CACHE = 'mat-study-v13';
+const CACHE = 'mat-study-v14';
 const SHELL = ['./', 'index.html', 'styles.css', 'app.js', 'config.js', 'manifest.webmanifest', 'icons/icon-192.png', 'icons/icon-512.png'];
 
 self.addEventListener('install', e => {

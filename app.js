@@ -214,9 +214,13 @@
   // Shared progress card: bar, counts, and a Stop button.
   function scanBoxHtml(p) {
     if (!p) return '';
-    return `<div class="scanbox"><div class="bar wide"><i data-w="${Math.round(p.pct * 100)}"></i></div>
-      <p class="small">${p.stopping ? 'Stopping…' : `<b>${Math.round(p.pct * 100)}%</b> · checked ${p.folders} folder${p.folders === 1 ? '' : 's'} · found ${p.found} video${p.found === 1 ? '' : 's'}`}</p>
-      <button class="btn ghost sm" data-scanstop ${p.stopping ? 'disabled' : ''}>■ Stop scan</button></div>`;
+    const pl = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
+    const text = p.stopping ? 'Stopping…'
+      : p.kind === 'toc' ? (p.reading ? `<b>${Math.round(p.pct * 100)}%</b> · reading chapter files ${p.done || 0} of ${p.total || 0}` : `📑 Looking for chapter files… checked ${pl(p.folders, 'file')} · found ${p.found}`)
+      : `<b>${Math.round(p.pct * 100)}%</b> · checked ${pl(p.folders, 'folder')} · found ${pl(p.found, 'video')}`;
+    const bar = p.pct === null ? '<div class="bar wide busy"><i></i></div>' : `<div class="bar wide"><i data-w="${Math.round(p.pct * 100)}"></i></div>`;
+    return `<div class="scanbox">${bar}<p class="small">${text}</p>
+      <button class="btn ghost sm" data-scanstop ${p.stopping ? 'disabled' : ''}>■ Stop</button></div>`;
   }
   document.addEventListener('click', e => { if (e.target.closest('[data-scanstop]')) Library.cancel(); });
   const Auth = {
@@ -446,13 +450,16 @@
       } finally { this.scanning = false; this.stop = false; this.prog = null; this.emit(); }
     },
     // Load chapters from new or changed table-of-contents files. A file you added by hand wins.
-    async loadTocs(tocs) {
-      let added = 0;
+    async loadTocs(tocs, onEach) {
+      let added = 0, done = 0;
       this.tocFailed = 0;
-      await mapLimit([...tocs].filter(([sid, k]) => {
+      const todo = [...tocs].filter(([sid, k]) => {
         const old = Store.d.toc[sid];
         return !(old && !old.deleted && old.src === 'file') && !(old && !old.deleted && old.fileId === k.id && old.mod === k.lastModifiedDateTime);
-      }), 4, async ([sid, k]) => {
+      });
+      if (onEach) onEach(0, todo.length);
+      try {
+      await mapLimit(todo, 4, async ([sid, k]) => {
         try {
           const url = k['@microsoft.graph.downloadUrl'] || ((await graph(`/me/drive/items/${enc(k.id)}`)) || {})['@microsoft.graph.downloadUrl'];
           if (!url) { this.tocFailed++; return; }
@@ -463,46 +470,49 @@
           Store.d.toc[sid] = { ...p, src: 'auto', file: k.name, fileId: k.id, mod: k.lastModifiedDateTime, updated: now() };
           added++;
         } catch (e) { this.tocFailed++; console.warn('toc', k.name, e); }
+        done++; if (onEach) onEach(done, todo.length);
       });
-      if (added) Store.save();
+      } finally { if (added) Store.save(); }
       return added;
     },
-    // Quick chapter-file check: asks OneDrive search for .html files instead of opening every folder.
+    // Quick chapter-file check. Asks OneDrive for the whole file list under your BJJ folder in a few big
+    // batches ("delta"), instead of opening every folder. Shows progress and can be stopped.
     async findTocs() {
       const st = Store.d.settings, lib = this.data;
       if (!lib || !st.rootId) return { found: 0, added: 0 };
-      if (DEMO) return { found: 0, added: 0 };
-      const sids = new Set(lib.series.map(s => s.id));
-      let files = [];
+      if (this.scanning) return { busy: true };
+      this.scanning = true; this.stop = false;
+      const p = this.prog = { kind: 'toc', found: 0, folders: 0, pct: null, stopping: false };
+      const chk = () => { if (this.stop) throw new ScanStopped(); };
+      this.emit();
       try {
-        let url = `/me/drive/items/${enc(st.rootId)}/search(q='html')?$top=200`;
-        while (url) { const j = await graph(url); if (!j) break; files.push(...j.value.filter(isToc)); url = j['@odata.nextLink']; }
-      } catch (e) { console.warn('toc search', e); files = []; }
-      // Which instructional each file belongs to: walk up its folders until we reach one.
-      const up = new Map();
-      const seriesOf = async (pid, depth = 0) => {
-        if (!pid || depth > 6 || pid === st.rootId) return null;
-        if (sids.has(pid)) return pid;
-        if (!up.has(pid)) { const it = await graph(`/me/drive/items/${enc(pid)}?$select=id,parentReference`); up.set(pid, it && it.parentReference && it.parentReference.id); }
-        return seriesOf(up.get(pid), depth + 1);
-      };
-      const tocs = new Map();
-      for (const f of files.sort(natural)) {
-        const sid = await seriesOf(f.parentReference && f.parentReference.id);
-        if (sid && !tocs.has(sid)) tocs.set(sid, f);
-      }
-      // Search can miss brand-new files for a few minutes; then look inside each instructional folder instead.
-      if (!tocs.size) {
-        const look = async (folderId, sid, depth) => {
-          for (const k of await listChildren(folderId)) {
-            if (k.folder && depth < 4) await look(k.id, sid, depth + 1);
-            else if (isToc(k) && !tocs.has(sid)) tocs.set(sid, k);
+        if (DEMO) { for (let i = 1; i <= 8; i++) { await new Promise(r => setTimeout(r, 250)); chk(); p.folders = i * 180; this.emit(); } return { found: 0, added: 0 }; }
+        const sids = new Set(lib.series.map(s => s.id));
+        const parent = new Map(), files = [];
+        let url = `/me/drive/items/${enc(st.rootId)}/delta?$select=id,name,file,folder,size,parentReference,lastModifiedDateTime,deleted`;
+        while (url) {
+          chk();
+          const j = await graph(url); if (!j) break;
+          for (const it of j.value || []) {
+            if (it.deleted) continue;
+            if (it.parentReference && it.parentReference.id) parent.set(it.id, it.parentReference.id);
+            if (isToc(it)) files.push(it);
           }
-        };
-        await mapLimit(lib.series.filter(s => !/ \(other videos\)$/.test(s.name)), 6, s => look(s.id, s.id, 0));
-      }
-      const added = await this.loadTocs(tocs);
-      return { found: tocs.size, added, failed: this.tocFailed };
+          p.folders += (j.value || []).length; p.found = files.length; this.emit();
+          url = j['@odata.nextLink'];
+        }
+        chk();
+        // Which instructional each file belongs to: climb its folders until one is an instructional.
+        const seriesOf = id => { for (let d = 0, x = parent.get(id); x && d < 8 && x !== st.rootId; d++, x = parent.get(x)) if (sids.has(x)) return x; return null; };
+        const tocs = new Map();
+        for (const f of files.sort(natural)) { const sid = seriesOf(f.id); if (sid && !tocs.has(sid)) tocs.set(sid, f); }
+        p.pct = 0; p.reading = true; this.emit();
+        const added = await this.loadTocs(tocs, (d, total) => { chk(); p.pct = total ? d / total : 1; p.total = total; p.done = d; this.emit(); });
+        return { found: tocs.size, added, failed: this.tocFailed, files: files.length };
+      } catch (e) {
+        if (e instanceof ScanStopped) return { stopped: true };
+        throw e;
+      } finally { this.scanning = false; this.stop = false; this.prog = null; this.emit(); }
     },
   };
   Library.reindex();
@@ -734,7 +744,7 @@
   function showTabs(on) { $('#tabbar').hidden = !on; document.body.classList.toggle('has-tabs', on); }
   function setTab(name) { $$('#tabbar a').forEach(a => a.classList.toggle('on', a.dataset.tab === name)); }
   function updateNet() { $('#netstate').hidden = navigator.onLine; }
-  Library.subs.add(p => { const s = $('#scanstate'); s.hidden = !p; if (p) s.textContent = p.stopping ? '■ Stopping…' : `🔄 Scanning ${Math.round(p.pct * 100)}%`; });
+  Library.subs.add(p => { const s = $('#scanstate'); s.hidden = !p; if (p) s.textContent = p.stopping ? '■ Stopping…' : p.pct === null ? '📑 Finding chapters…' : `${p.kind === 'toc' ? '📑' : '🔄 Scanning'} ${Math.round(p.pct * 100)}%`; });
   window.addEventListener('online', () => { updateNet(); Sync.run(); });
   window.addEventListener('offline', updateNet);
   function applyTheme() { document.documentElement.dataset.theme = localStorage.getItem('bjj.theme') || 'dark'; }
@@ -1671,7 +1681,8 @@
     const drawScan = p => {
       const box = $('#scanBox'), b = $('#rescan'); if (!box || !b) return;
       box.innerHTML = scanBoxHtml(p); applySizes(box);
-      b.disabled = !!p; b.textContent = p ? 'Scanning…' : 'Rescan for new videos';
+      b.disabled = !!p; b.textContent = p && p.kind !== 'toc' ? 'Scanning…' : 'Rescan for new videos';
+      const f = $('#findToc'); if (f) { f.disabled = !!p; f.textContent = p && p.kind === 'toc' ? 'Looking…' : '📑 Find chapter files'; }
     };
     Library.subs.add(drawScan); drawScan(Library.prog);
     cleanup = () => Library.subs.delete(drawScan);
@@ -1683,15 +1694,15 @@
       route();
     };
     $('#findToc').onclick = async () => {
-      const b = $('#findToc'); b.disabled = true; b.textContent = 'Looking…';
       try {
         const r = await Library.findTocs();
-        toast(!r.found ? 'No chapter files found. Put the .html file inside the instructional folder.'
+        toast(r.busy ? 'A scan is already running. Wait for it or stop it first.'
+          : r.stopped ? 'Stopped looking for chapter files.'
+          : !r.found ? (r.files ? `Found ${r.files} .html file${r.files > 1 ? 's' : ''}, but not inside an instructional folder.` : 'No chapter files found. Put the .html file inside the instructional folder.')
           : r.failed && !r.added ? `Found ${r.found} chapter file${r.found > 1 ? 's' : ''} but couldn't read ${r.failed > 1 ? 'them' : 'it'}.`
           : r.added ? `📑 Added chapters to ${r.added} instructional${r.added > 1 ? 's' : ''}${r.failed ? ` (${r.failed} couldn't be read)` : ''}`
           : `Found ${r.found} chapter file${r.found > 1 ? 's' : ''}, all already loaded ✓`);
       } catch (e) { fail(e); }
-      b.disabled = false; b.textContent = '📑 Find chapter files';
     };
     $('#theme').onclick =() => { localStorage.setItem('bjj.theme', theme === 'dark' ? 'light' : 'dark'); applyTheme(); route(); };
     $('#syncNow').onclick = async () => { Sync.dirty = true; await Sync.run(); toast(Sync.failed ? 'Backup failed, will retry' : 'Backed up ✓'); route(); };

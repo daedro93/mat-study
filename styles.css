@@ -24,6 +24,13 @@ h3 { font-size: 1rem; margin: 1.4rem 0 .5rem; }
 
 .topbar { position: sticky; top: 0; z-index: 5; display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; background: var(--bg); border-bottom: 1px solid var(--line); }
 .brand { font-weight: 700; font-size: 1.1rem; }
+.topright { display: flex; gap: 6px; align-items: center; }
+.scanstate { background: var(--bg3); color: var(--fg); border-radius: 99px; padding: 2px 10px; font-size: .8rem; font-variant-numeric: tabular-nums; }
+.scanstate[hidden] { display: none; }
+.scanbox { margin: 12px 0 4px; padding: 12px; border-radius: 12px; background: var(--bg3); }
+.scanbox p { margin: 8px 0; }
+.scanbox .bar { background: var(--bg2); }
+.scanbox .bar i { transition: width .3s; }
 .netstate { background: var(--danger); color: #fff; border-radius: 99px; padding: 2px 10px; font-size: .8rem; }
 main { padding: 12px 16px; max-width: 960px; margin: 0 auto; }
 
@@ -275,3 +282,4 @@ a.vrow { color: inherit; }
   .player { margin: 0; border-radius: 14px; overflow: hidden; }
   .card { width: 200px; }
 }
+.tocor { margin: 14px 0 6px; }

@@ -56,7 +56,36 @@
     }
     return out.replace(/,(\s*[\]}])/g, '$1');
   }
+  // Style 0: a BJJ Fanatics product page ("Volume 1" heading, then a table of chapter / start time).
+  // DOMParser only builds the page as data: no scripts run and no images load.
+  function parseShopPage(html) {
+    // Strip the page's code and styling first; only names and times are needed.
+    const clean = html.replace(/<(script|style|svg|noscript|iframe|template)\b[\s\S]*?<\/\1>/gi, '')
+      .replace(/\s(on\w+|style|src|srcset|href)\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, '');
+    const doc = new DOMParser().parseFromString(clean, 'text/html'), vols = {};
+    let n = 0;
+    doc.querySelectorAll('.product__course-title').forEach(h => {
+      const num = (h.textContent.match(/(\d+)/) || [])[1] || String(++n);
+      let el = h.nextElementSibling;
+      while (el && !el.querySelector('tr') && !el.matches('.product__course-title')) el = el.nextElementSibling;
+      if (!el || el.matches('.product__course-title')) return;
+      const rows = [...el.querySelectorAll('tr')].map(tr => [...tr.querySelectorAll('td')].map(td => td.textContent.replace(/\s+/g, ' ').trim()))
+        .filter(c => c.length >= 2 && /^\d+(?::\d{1,2}){0,2}$/.test(c[c.length - 1]));
+      if (rows.length) vols[num] = rows.map(c => ({ t: toSec(c[c.length - 1]), name: c[0].slice(0, 200) }));
+    });
+    const title = ((doc.querySelector('meta[property="og:title"]') || {}).content || (doc.querySelector('title') || {}).textContent || '').trim();
+    return { title, vols };
+  }
+  // Only BJJ Fanatics product links are accepted.
+  function shopUrl(s) {
+    try {
+      const u = new URL(s.trim());
+      if (u.protocol !== 'https:' || !/^(www\.)?bjjfanatics\.com$/i.test(u.hostname) || !/^\/(collections\/[^/]+\/)?products\/[\w-]+\/?$/i.test(u.pathname)) return null;
+      return 'https://bjjfanatics.com/products/' + u.pathname.split('/products/')[1].replace(/\/$/, '');
+    } catch { return null; }
+  }
   function parseToc(text) {
+    if (/product__course-title/.test(text)) { const p = parseShopPage(text); if (Object.keys(p.vols).length) return p; }
     const vols = {};
     const title = ((text.match(/<title>([^<]*)<\/title>/i) || [])[1] || '').trim();
     // Style 1: data = { 1: [["Chapter name", "0:00"], ...], 2: [...] }
@@ -181,6 +210,15 @@
 
   // ---------- sign-in (Microsoft, PKCE; no secrets in this code)
   class NeedLogin extends Error {}
+  class ScanStopped extends Error {}
+  // Shared progress card: bar, counts, and a Stop button.
+  function scanBoxHtml(p) {
+    if (!p) return '';
+    return `<div class="scanbox"><div class="bar wide"><i data-w="${Math.round(p.pct * 100)}"></i></div>
+      <p class="small">${p.stopping ? 'Stopping…' : `<b>${Math.round(p.pct * 100)}%</b> · checked ${p.folders} folder${p.folders === 1 ? '' : 's'} · found ${p.found} video${p.found === 1 ? '' : 's'}`}</p>
+      <button class="btn ghost sm" data-scanstop ${p.stopping ? 'disabled' : ''}>■ Stop scan</button></div>`;
+  }
+  document.addEventListener('click', e => { if (e.target.closest('[data-scanstop]')) Library.cancel(); });
   const Auth = {
     get tokens() { return readJSON('bjj.tokens', null); },
     set tokens(v) { v ? writeJSON('bjj.tokens', v) : localStorage.removeItem('bjj.tokens'); },
@@ -329,20 +367,38 @@
     },
     get(id) { return this.index.get(id); },
     series(id) { return this.byId.get(id); },
-    async scan(onStep) {
+    // Live scan progress, so any screen can show it. Stopping keeps your current library as it was.
+    running: null, stop: false, prog: null, subs: new Set(),
+    emit() { this.subs.forEach(fn => { try { fn(this.prog); } catch { /* ignore */ } }); },
+    cancel() { if (this.scanning && !this.stop) { this.stop = true; if (this.prog) this.prog.stopping = true; this.emit(); } },
+    // Returns 'done', 'stopped', or nothing (no folder chosen). A second tap joins the scan already running.
+    scan(onStep) {
+      if (!Store.d.settings.rootId) return Promise.resolve();
+      if (this.running) return this.running;
+      this.running = this.runScan(onStep).finally(() => { this.running = null; });
+      return this.running;
+    },
+    async runScan(onStep) {
       const st = Store.d.settings;
-      if (!st.rootId || this.scanning) return;
-      this.scanning = true;
+      this.scanning = true; this.stop = false;
+      const p = this.prog = { found: 0, folders: 0, pct: 0, stopping: false };
+      const chk = () => { if (this.stop) throw new ScanStopped(); };
+      const tick = () => { if (onStep) onStep(p.found); this.emit(); };
+      this.emit();
       try {
-        if (DEMO) { this.set(demoLibrary()); return; }
+        if (DEMO) { // pretend to scan slowly so the progress bar can be tried
+          for (let i = 1; i <= 20; i++) { await new Promise(r => setTimeout(r, 250)); chk(); p.folders = i * 3; p.found = i * 4; p.pct = i / 20; tick(); }
+          this.set(demoLibrary()); return 'done';
+        }
         const mapVid = (k, sub) => ({
           id: k.id, name: cleanName(k.name), sub, size: k.size,
           thumb: (k.thumbnails && k.thumbnails[0] && k.thumbnails[0].medium && k.thumbnails[0].medium.url) || '',
         });
         const tocs = new Map(); // instructional id -> table-of-contents file found in its folder
         const noteToc = (sid, k) => { if (!tocs.has(sid)) tocs.set(sid, k); };
+        const list = async id => { chk(); const r = await listChildren(id); chk(); p.folders++; return r; };
         const collect = async (folderId, out, depth, prefix, sid) => {
-          for (const k of (await listChildren(folderId)).sort(natural)) {
+          for (const k of (await list(folderId)).sort(natural)) {
             if (k.folder && depth < 4) await collect(k.id, out, depth + 1, prefix ? prefix + ' / ' + k.name : k.name, sid);
             else if (isVideo(k)) out.push(mapVid(k, prefix));
             else if (isToc(k)) noteToc(sid, k);
@@ -352,31 +408,42 @@
         // A top folder that only holds videos is an instructional by itself.
         // A top folder with sub-folders is an instructor (group); each sub-folder is one instructional.
         const series = [], loose = [];
-        let found = 0;
-        const step = add => { found += add; if (onStep) onStep(found); };
-        for (const it of (await listChildren(st.rootId)).sort(natural)) {
+        const step = add => { p.found += add; tick(); };
+        const top = (await list(st.rootId)).sort(natural);
+        const topTotal = Math.max(1, top.filter(it => it.folder).length);
+        let topDone = 0;
+        for (const it of top) {
           if (!it.folder) { if (isVideo(it)) loose.push(mapVid(it, '')); continue; }
-          const kids = (await listChildren(it.id)).sort(natural);
+          const kids = (await list(it.id)).sort(natural);
           const direct = kids.filter(isVideo).map(k => mapVid(k, ''));
           const subs = kids.filter(k => k.folder);
           if (!subs.length) {
-            if (direct.length) { series.push({ id: it.id, name: it.name, group: null, videos: direct }); step(direct.length); const t = kids.find(isToc); if (t) noteToc(it.id, t); }
+            if (direct.length) { series.push({ id: it.id, name: it.name, group: null, videos: direct }); const t = kids.find(isToc); if (t) noteToc(it.id, t); }
+            topDone++; p.pct = topDone / topTotal; step(direct.length);
             continue;
           }
           const group = { id: it.id, name: it.name };
+          let subDone = 0;
           const inner = await mapLimit(subs, 6, async sf => {
             const vids = [];
             await collect(sf.id, vids, 0, '', sf.id);
+            subDone++; p.pct = (topDone + subDone / subs.length) / topTotal;
             step(vids.length);
             return vids.length ? { id: sf.id, name: sf.name, group, videos: vids } : null;
           });
           if (direct.length) { series.push({ id: it.id, name: it.name + ' (other videos)', group, videos: direct }); step(direct.length); }
           series.push(...inner.filter(Boolean));
+          topDone++; p.pct = topDone / topTotal; tick();
         }
+        chk();
         if (loose.length) series.unshift({ id: st.rootId, name: st.rootName || 'Videos', group: null, videos: loose });
         this.set({ v: 2, rootId: st.rootId, scannedAt: now(), series });
         await this.loadTocs(tocs);
-      } finally { this.scanning = false; }
+        return 'done';
+      } catch (e) {
+        if (e instanceof ScanStopped) return 'stopped';
+        throw e;
+      } finally { this.scanning = false; this.stop = false; this.prog = null; this.emit(); }
     },
     // Load chapters from new or changed table-of-contents files. A file you added by hand wins.
     async loadTocs(tocs) {
@@ -663,6 +730,7 @@
   function showTabs(on) { $('#tabbar').hidden = !on; document.body.classList.toggle('has-tabs', on); }
   function setTab(name) { $$('#tabbar a').forEach(a => a.classList.toggle('on', a.dataset.tab === name)); }
   function updateNet() { $('#netstate').hidden = navigator.onLine; }
+  Library.subs.add(p => { const s = $('#scanstate'); s.hidden = !p; if (p) s.textContent = p.stopping ? '■ Stopping…' : `🔄 Scanning ${Math.round(p.pct * 100)}%`; });
   window.addEventListener('online', () => { updateNet(); Sync.run(); });
   window.addEventListener('offline', updateNet);
   function applyTheme() { document.documentElement.dataset.theme = localStorage.getItem('bjj.theme') || 'dark'; }
@@ -823,9 +891,20 @@
   }
 
   async function scanScreen() {
-    app.innerHTML = `<div class="empty"><div class="spinner"></div><h2>Finding your videos…</h2><p id="scanMsg">Looking in "${esc(Store.d.settings.rootName)}"</p><p class="small">Only names are read, nothing is downloaded. You only wait like this once.</p></div>`;
-    await Library.scan(n => { const m = $('#scanMsg'); if (m) m.textContent = `Found ${n} video${n === 1 ? '' : 's'} so far…`; });
-    if (location.hash === '' || location.hash === '#/') route();
+    app.innerHTML = `<div class="empty"><div class="spinner"></div><h2>Finding your videos…</h2><p id="scanMsg">Looking in "${esc(Store.d.settings.rootName)}"</p><div id="scanBox"></div><p class="small">Only names are read, nothing is downloaded. You only wait like this once.</p></div>`;
+    const draw = p => { const b = $('#scanBox'); if (b) { b.innerHTML = scanBoxHtml(p); applySizes(b); } };
+    Library.subs.add(draw); draw(Library.prog);
+    cleanup = () => Library.subs.delete(draw);
+    let r;
+    try { r = await Library.scan(); } finally { Library.subs.delete(draw); }
+    if (location.hash !== '' && location.hash !== '#/') return;
+    if (r === 'stopped' && !(Library.data && Library.data.rootId === Store.d.settings.rootId)) {
+      app.innerHTML = emptyState('Scan stopped', 'Your videos are not loaded yet. Start again when you are ready.');
+      app.insertAdjacentHTML('beforeend', '<div class="center-text"><button class="btn primary" id="scanAgain">Start scan again</button></div>');
+      $('#scanAgain').onclick = () => route();
+      return;
+    }
+    route();
   }
 
   function SeriesPage(id) {
@@ -854,6 +933,27 @@
       Store.d.toc[s.id] = { deleted: true, updated: now() }; Store.save(); route();
       toast('Chapters removed', { label: 'Undo', fn: () => { Store.d.toc[s.id] = { ...old, updated: now() }; Store.save(); route(); } });
     };
+    const getUrl = async () => {
+      const url = shopUrl($('#tocUrl').value);
+      if (!url) { toast('Paste a BJJ Fanatics product link, like https://bjjfanatics.com/products/…'); return; }
+      const b = $('#tocGet'); b.disabled = true; b.textContent = '…';
+      try {
+        const r = await fetch(url, { credentials: 'omit', referrerPolicy: 'no-referrer', cache: 'no-store' });
+        if (!r.ok) throw new Error('status ' + r.status);
+        const p = parseShopPage(await r.text());
+        const n = Object.keys(p.vols).length;
+        if (!n) { toast("That page doesn't list chapter times."); return; }
+        Store.d.toc[s.id] = { ...p, src: 'file', file: 'BJJ Fanatics: ' + (p.title || 'product page'), url, updated: now() };
+        Store.save(); route();
+        const matched = tocMap(s).size;
+        toast(matched ? `📑 Chapters added to ${matched} of ${s.videos.length} videos` : `Found ${n} volumes, but couldn't match them to the videos.`);
+      } catch (e) {
+        console.warn('bjjf', e);
+        toast(navigator.onLine ? "Couldn't read that page. Check the link and try again." : 'You are offline.');
+      } finally { const bb = $('#tocGet'); if (bb) { bb.disabled = false; bb.textContent = 'Get'; } }
+    };
+    $('#tocGet').onclick = getUrl;
+    $('#tocUrl').onkeydown = e => { if (e.key === 'Enter') getUrl(); };
     inp.onchange = async () => {
       const f = inp.files[0]; if (!f) return;
       if (f.size > 2e6) { toast('That file is too big for a table of contents.'); return; }
@@ -867,7 +967,9 @@
   }
   function tocPanel(s) {
     const toc = Store.d.toc[s.id];
-    const input = '<input type="file" id="tocFile" accept=".html,.htm,text/html" hidden>';
+    const input = `<input type="file" id="tocFile" accept=".html,.htm,text/html" hidden>
+      <p class="small tocor">Or paste the BJJ Fanatics link for this instructional:</p>
+      <div class="addrow"><input id="tocUrl" type="url" inputmode="url" autocomplete="off" placeholder="https://bjjfanatics.com/products/…"><button class="btn primary" id="tocGet">Get</button></div>`;
     if (!toc || toc.deleted) {
       return `<div class="panel tocp"><h3>📑 Chapters</h3>
         <p class="small muted">Add this instructional's table-of-contents file (.html) to see chapters under each video.
@@ -1542,6 +1644,7 @@
       <div class="panel"><h3>📁 Library</h3>
         <p>Folder: <b>${esc(Store.d.settings.rootName || 'not chosen')}</b><br><span class="muted small">${count} videos · checked ${ago(lib && lib.scannedAt)}</span></p>
         <div class="btns"><a class="btn ghost" href="#/pick/root">Change folder</a><button class="btn ghost" id="rescan">Rescan for new videos</button><button class="btn ghost" id="findToc">📑 Find chapter files</button></div>
+        <div id="scanBox"></div>
         <p class="small muted">"Find chapter files" only looks for table-of-contents (.html) files, so it's much faster than a full rescan.</p></div>
       <div class="panel"><h3>📱 App</h3>
         ${standalone ? '<p>Installed on your home screen ✓</p>' : installEvt ? '<button class="btn primary" id="install">Add to home screen</button>' : '<p class="small">To add it to your home screen: in Chrome tap <b>⋮</b> then <b>Add to Home screen</b>.</p>'}
@@ -1560,7 +1663,21 @@
           <li>✓ No server and no other company in between: your phone talks straight to Microsoft.</li>
         </ul>
         ${DEMO ? '' : `<p class="small">Signed in as <b>${esc(t.name || 'you')}</b></p><button class="btn danger" id="signout">Sign out</button>`}</div>`;
-    $('#rescan').onclick = async () => { const b = $('#rescan'); b.disabled = true; b.textContent = 'Scanning…'; try { await Library.scan(); toast('Library updated ✓'); } catch (e) { fail(e); return; } route(); };
+    // Live progress while a scan runs (also one that started by itself in the background)
+    const drawScan = p => {
+      const box = $('#scanBox'), b = $('#rescan'); if (!box || !b) return;
+      box.innerHTML = scanBoxHtml(p); applySizes(box);
+      b.disabled = !!p; b.textContent = p ? 'Scanning…' : 'Rescan for new videos';
+    };
+    Library.subs.add(drawScan); drawScan(Library.prog);
+    cleanup = () => Library.subs.delete(drawScan);
+    $('#rescan').onclick = async () => {
+      let r;
+      try { r = await Library.scan(); } catch (e) { fail(e); return; }
+      if (!location.hash.startsWith('#/settings')) return;
+      toast(r === 'stopped' ? 'Scan stopped. Your library is the same as before.' : 'Library updated ✓');
+      route();
+    };
     $('#findToc').onclick = async () => {
       const b = $('#findToc'); b.disabled = true; b.textContent = 'Looking…';
       try {

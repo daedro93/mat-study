@@ -1093,9 +1093,10 @@
     function openSheet(page) {
       const s = $('#sheet');
       const row = (act, icon, label, val, more = true) => `<button class="mrow" data-m="${act}"><span class="mi">${icon}</span><span class="ml">${label}</span><span class="mv">${esc(val)}</span>${more ? '<b>›</b>' : ''}</button>`;
-      const head = title => `<div class="mhead"><button class="ic" data-m="main" aria-label="Back">‹</button><b>${title}</b></div>`;
+      const head = title => `<div class="mhead"><button class="ic" data-m="main" aria-label="Back">‹</button><b>${title}</b><button class="ic" data-m="close" aria-label="Close">✕</button></div>`;
       if (page === 'main') {
-        s.innerHTML = row('sleep', '🌙', 'Sleep timer', sleepLabel()) + row('speed', '🐢', 'Playback speed', speedLabel())
+        s.innerHTML = `<div class="mhead"><b>Settings</b><button class="ic" data-m="close" aria-label="Close">✕</button></div>`
+          + row('sleep', '🌙', 'Sleep timer', sleepLabel()) + row('speed', '🐢', 'Playback speed', speedLabel())
           + row('loop', '🔁', loopA === null ? 'Loop a move' : 'Stop loop', loopLabel(), false)
           + (document.pictureInPictureEnabled ? row('pip', '🗗', 'Mini player', '', false) : '')
           + row('auto', '⏭️', 'Auto-play next', autoOn() ? 'On' : 'Off', false);
@@ -1116,7 +1117,7 @@
     $('#gear').onclick = () => openSheet('main');
     if (chs.length) $('#chapBtn').onclick = () => openSheet('chapters');
     $('#sheetwrap').onclick = async e => {
-      if (e.target.id === 'sheetwrap') { closeSheet(); return; }
+      if (!e.target.closest('#sheet')) { closeSheet(); return; }
       const b = e.target.closest('[data-m]'); if (!b) return;
       const m = b.dataset.m, x = b.dataset.x;
       if (m === 'main' || m === 'speed' || m === 'sleep') openSheet(m);

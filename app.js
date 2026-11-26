@@ -448,18 +448,21 @@
     // Load chapters from new or changed table-of-contents files. A file you added by hand wins.
     async loadTocs(tocs) {
       let added = 0;
+      this.tocFailed = 0;
       await mapLimit([...tocs].filter(([sid, k]) => {
         const old = Store.d.toc[sid];
         return !(old && !old.deleted && old.src === 'file') && !(old && !old.deleted && old.fileId === k.id && old.mod === k.lastModifiedDateTime);
       }), 4, async ([sid, k]) => {
         try {
           const url = k['@microsoft.graph.downloadUrl'] || ((await graph(`/me/drive/items/${enc(k.id)}`)) || {})['@microsoft.graph.downloadUrl'];
-          if (!url) return;
-          const p = parseToc(await (await fetch(url)).text());
-          if (!Object.keys(p.vols).length) return;
+          if (!url) { this.tocFailed++; return; }
+          const r = await fetch(url, { credentials: 'omit' });
+          if (!r.ok) throw new Error('download ' + r.status);
+          const p = parseToc(await r.text());
+          if (!Object.keys(p.vols).length) { this.tocFailed++; return; }
           Store.d.toc[sid] = { ...p, src: 'auto', file: k.name, fileId: k.id, mod: k.lastModifiedDateTime, updated: now() };
           added++;
-        } catch (e) { console.warn('toc', k.name, e); }
+        } catch (e) { this.tocFailed++; console.warn('toc', k.name, e); }
       });
       if (added) Store.save();
       return added;
@@ -489,7 +492,7 @@
         if (sid && !tocs.has(sid)) tocs.set(sid, f);
       }
       // Search can miss brand-new files for a few minutes; then look inside each instructional folder instead.
-      if (!files.length) {
+      if (!tocs.size) {
         const look = async (folderId, sid, depth) => {
           for (const k of await listChildren(folderId)) {
             if (k.folder && depth < 4) await look(k.id, sid, depth + 1);
@@ -498,7 +501,8 @@
         };
         await mapLimit(lib.series.filter(s => !/ \(other videos\)$/.test(s.name)), 6, s => look(s.id, s.id, 0));
       }
-      return { found: tocs.size, added: await this.loadTocs(tocs) };
+      const added = await this.loadTocs(tocs);
+      return { found: tocs.size, added, failed: this.tocFailed };
     },
   };
   Library.reindex();
@@ -1683,7 +1687,9 @@
       try {
         const r = await Library.findTocs();
         toast(!r.found ? 'No chapter files found. Put the .html file inside the instructional folder.'
-          : r.added ? `📑 Added chapters to ${r.added} instructional${r.added > 1 ? 's' : ''}` : `Found ${r.found} chapter file${r.found > 1 ? 's' : ''}, all already loaded ✓`);
+          : r.failed && !r.added ? `Found ${r.found} chapter file${r.found > 1 ? 's' : ''} but couldn't read ${r.failed > 1 ? 'them' : 'it'}.`
+          : r.added ? `📑 Added chapters to ${r.added} instructional${r.added > 1 ? 's' : ''}${r.failed ? ` (${r.failed} couldn't be read)` : ''}`
+          : `Found ${r.found} chapter file${r.found > 1 ? 's' : ''}, all already loaded ✓`);
       } catch (e) { fail(e); }
       b.disabled = false; b.textContent = '📑 Find chapter files';
     };

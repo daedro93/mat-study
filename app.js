@@ -167,6 +167,19 @@
     clearTimeout(toast.t);
     toast.t = setTimeout(() => el.classList.remove('show'), action ? 6000 : 2600);
   }
+  // Keep popups in the part of the screen the keyboard isn't covering.
+  function fitDialog() {
+    const d = $('#dlg'), vv = window.visualViewport;
+    if (!d || !d.open || !vv) return;
+    const short = vv.height < 520;
+    d.classList.toggle('short', short);
+    d.style.maxHeight = Math.max(140, vv.height - 12) + 'px';
+    d.style.marginTop = short ? (vv.offsetTop + 6) + 'px' : '';
+    const f = document.activeElement;
+    if (f && d.contains(f) && f.scrollIntoView) f.scrollIntoView({ block: 'nearest' });
+  }
+  if (window.visualViewport) { visualViewport.addEventListener('resize', fitDialog); visualViewport.addEventListener('scroll', fitDialog); }
+  new MutationObserver(() => setTimeout(fitDialog, 50)).observe($('#dlg'), { attributes: true, attributeFilter: ['open'] });
   function ask({ title, value = '', placeholder = '', check, okLabel = 'Save' }) {
     return new Promise(resolve => {
       const d = $('#dlg');
@@ -1306,8 +1319,11 @@
     // --- bookmarks
     $('#bm').onclick = async () => {
       const t = v.currentTime, wasPlaying = !v.paused;
-      v.pause();
-      const r = await askBookmark(t);
+      // Keep the video paused until the bookmark is saved or cancelled, even if something tries to play it.
+      const hold = () => v.pause();
+      v.pause(); v.addEventListener('play', hold);
+      let r;
+      try { r = await askBookmark(t); } finally { v.removeEventListener('play', hold); }
       if (r && alive) {
         const b = { id: uid(), itemId: id, t, label: r.text || 'Moment at ' + fmt(t), created: now(), updated: now() };
         Store.d.bookmarks[b.id] = b;

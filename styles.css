@@ -295,6 +295,16 @@ a.vrow { color: inherit; }
 .chk { display: flex; align-items: center; gap: 10px; margin: 14px 0 4px; font-size: .95rem; }
 .chk input { width: 22px; height: 22px; accent-color: var(--accent); }
 .dlg-btns { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+#dlg { overflow-y: auto; }
+/* short screens (landscape with the keyboard open): compact popup at the top */
+#dlg.short { width: min(720px, calc(100vw - 24px)); padding: 10px 14px; margin-bottom: auto; }
+#dlg.short h3 { font-size: 1rem; margin: 0 0 6px; }
+#dlg.short #dlgIn, #dlg.short #dlgNew { min-height: 38px; padding: 6px 12px; }
+#dlg.short .fld { flex-direction: row; align-items: center; gap: 8px; margin: 6px 0 0; font-size: .9rem; white-space: nowrap; }
+#dlg.short .fld select { flex: 1; min-height: 38px; padding: 6px 10px; }
+#dlg.short #dlgNew { margin-top: 6px; }
+#dlg.short .dlg-btns { margin-top: 8px; }
+#dlg.short .dlg-btns .btn { min-height: 38px; padding: 6px 16px; }
 
 @media (min-width: 900px) {
   .player { margin: 0; border-radius: 14px; overflow: hidden; }

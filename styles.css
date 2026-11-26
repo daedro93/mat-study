@@ -311,3 +311,5 @@ a.vrow { color: inherit; }
   .card { width: 200px; }
 }
 .tocor { margin: 14px 0 6px; }
+.archlink { margin-top: 16px; color: var(--muted); }
+.srow.note { align-items: flex-start; }

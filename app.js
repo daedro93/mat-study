@@ -631,7 +631,49 @@
   }
   migrate();
   const byCreated = (a, b) => (a.created || 0) - (b.created || 0);
-  const roadmaps = () => Object.values(Store.d.roadmaps).filter(r => !r.deleted).sort(byCreated);
+  const roadmaps = () => Object.values(Store.d.roadmaps).filter(r => !r.deleted && !r.archived).sort(byCreated);
+
+  // ---------- archive & delete (the same for everything you create)
+  // Archive = hidden from your lists but kept, restore anytime. Delete = gone (with a few seconds to undo).
+  const KINDS = {
+    bm: { store: 'bookmarks', name: 'Bookmark' }, drill: { store: 'drills', name: 'Drill' },
+    snote: { store: 'snotes', name: 'Note' }, vnote: { store: 'notes', name: 'Video note' },
+    dlist: { store: 'dlists', name: 'Drill list' }, rm: { store: 'roadmaps', name: 'Roadmap' },
+  };
+  const archivedOf = store => Object.entries(Store.d[store]).filter(([, x]) => x && !x.deleted && x.archived);
+  const redraw = () => (refresh ? refresh() : route());
+  function patchRec(kind, id, patch) {
+    const st = KINDS[kind].store, cur = Store.d[st][id];
+    if (!cur) return null;
+    Store.d[st][id] = { ...cur, ...patch, updated: now() }; Store.save();
+    return cur;
+  }
+  function archiveRec(kind, id, on) {
+    const before = patchRec(kind, id, { archived: on });
+    if (!before) return;
+    if (on && kind === 'dlist' && sessionStorage.getItem('bjj.dl') === id) sessionStorage.setItem('bjj.dl', 'all');
+    toast(`${KINDS[kind].name} ${on ? 'archived 🗄' : 'restored ↩'}`, { label: 'Undo', fn: () => { patchRec(kind, id, { archived: !!before.archived }); redraw(); } });
+  }
+  function deleteRec(kind, id) {
+    const cur = Store.d[KINDS[kind].store][id];
+    if (!cur) return false;
+    const label = String(cur.name || cur.title || '').slice(0, 60);
+    // Bigger things ask first; small ones (bookmarks, drills, video notes) just offer Undo.
+    if ((kind === 'dlist' || kind === 'rm' || kind === 'snote')
+      && !confirm(`Delete ${KINDS[kind].name.toLowerCase()} "${label}"?${kind === 'snote' ? '' : ' Its drills move to General.'}`)) return false;
+    patchRec(kind, id, { deleted: true });
+    toast(`${KINDS[kind].name} deleted`, { label: 'Undo', fn: () => { patchRec(kind, id, { deleted: false }); redraw(); } });
+    return true;
+  }
+  // Drills in an archived list or roadmap are hidden along with it.
+  const inArchivedList = d => !!d.listId && !!((Store.d.dlists[d.listId] && !Store.d.dlists[d.listId].deleted && Store.d.dlists[d.listId].archived)
+    || (Store.d.roadmaps[d.listId] && !Store.d.roadmaps[d.listId].deleted && Store.d.roadmaps[d.listId].archived));
+  const liveDrill = d => !d.archived && !inArchivedList(d);
+  const archBtns = (kind, id) => `<button class="ibtn" data-act="unarch" data-kind="${kind}" data-id="${esc(id)}" aria-label="Restore">↩</button>
+    <button class="ibtn" data-act="del" data-kind="${kind}" data-id="${esc(id)}" aria-label="Delete">🗑</button>`;
+  const moreBtn = (kind, id) => `<button class="ibtn" data-act="more" data-kind="${kind}" data-id="${esc(id)}" aria-label="More options">⋯</button>`;
+  const archLink = (view, n) => n ? `<button class="btn ghost full archlink" data-act="archView" data-id="${view}">🗄 Archived (${n})</button>` : '';
+  const inArch = view => sessionStorage.getItem('bjj.arch.' + view) === '1';
   function curRoadmap() {
     const all = roadmaps(), id = localStorage.getItem('bjj.rm');
     return all.find(r => r.id === id) || all[0] || null;
@@ -663,11 +705,12 @@
   }
 
   // ---------- drill lists (General + your own named lists + one per roadmap)
-  const dlists = () => Object.values(Store.d.dlists).filter(l => !l.deleted).sort(byCreated);
+  const dlists = () => Object.values(Store.d.dlists).filter(l => !l.deleted && !l.archived).sort(byCreated);
   // A drill whose list was deleted falls back to General.
   const listOf = d => (d.listId && ((Store.d.dlists[d.listId] && !Store.d.dlists[d.listId].deleted) || (Store.d.roadmaps[d.listId] && !Store.d.roadmaps[d.listId].deleted))) ? d.listId : null;
   const allLists = () => [{ id: null, name: 'General' }, ...dlists().map(l => ({ id: l.id, name: l.name })), ...roadmaps().map(r => ({ id: r.id, name: '🗺️ ' + r.name }))];
-  const listName = id => (allLists().find(l => l.id === id) || { name: 'General' }).name;
+  const listName = id => (allLists().find(l => l.id === id) || (Store.d.dlists[id] && { name: Store.d.dlists[id].name })
+    || (Store.d.roadmaps[id] && { name: '🗺️ ' + Store.d.roadmaps[id].name }) || { name: 'General' }).name;
   function makeList(name) {
     const l = { id: uid(), name: name || 'New list', created: now(), updated: now() };
     Store.d.dlists[l.id] = l; Store.save();
@@ -1012,10 +1055,18 @@
   }
 
   function Roadmap() {
-    const all = roadmaps(), r = curRoadmap();
+    const all = roadmaps(), r = curRoadmap(), archived = archivedOf('roadmaps');
+    if (inArch('roadmap')) {
+      app.innerHTML = `<div class="rmhead"><button class="ibtn" data-act="archView" data-id="roadmap" aria-label="Back">‹</button><h2>🗄 Archived roadmaps</h2></div>
+        <p class="muted small">Hidden from your roadmaps, along with their notes and drills. ↩ brings one back, 🗑 deletes it.</p>
+        ${archived.length ? `<ul class="list">${archived.map(([k, x]) => `<li class="srow"><span class="dtxt"><b>🗺️ ${esc(x.name)}</b><small>${x.steps.length} steps</small></span>${archBtns('rm', k)}</li>`).join('')}</ul>`
+          : emptyState('Nothing archived', 'Roadmaps you archive show up here.')}`;
+      return;
+    }
     let html = `<h1>🗺️ Roadmaps</h1>
       <div class="chips">${all.map(x => `<button class="chip ${r && x.id === r.id ? 'on' : ''}" data-act="openRm" data-id="${esc(x.id)}">${esc(x.name)}</button>`).join('')}
-        <button class="chip add" data-act="newRm">+ New roadmap</button></div>`;
+        <button class="chip add" data-act="newRm">+ New roadmap</button>
+        ${archived.length ? `<button class="chip" data-act="archView" data-id="roadmap">🗄 Archived (${archived.length})</button>` : ''}</div>`;
     if (!r) {
       app.innerHTML = html + emptyState('No roadmap yet', 'A roadmap is your study order: instructional 1, then 2, then 3. Give it a name like "Leg lock path".')
         + '<button class="btn primary full" data-act="newRm">+ Create my first roadmap</button>';
@@ -1025,7 +1076,8 @@
     const cur = steps.findIndex(s => !seriesDone(s));
     html += `<div class="rmhead"><h2>${esc(r.name)}</h2>
         <button class="ibtn" data-act="renameRm" data-id="${esc(r.id)}" aria-label="Rename roadmap">✎</button>
-        <button class="ibtn" data-act="delRm" data-id="${esc(r.id)}" aria-label="Delete roadmap">🗑</button></div>
+        <button class="ibtn" data-act="arch" data-kind="rm" data-id="${esc(r.id)}" aria-label="Archive roadmap">🗄</button>
+        <button class="ibtn" data-act="del" data-kind="rm" data-id="${esc(r.id)}" aria-label="Delete roadmap">🗑</button></div>
       <p class="muted small">Finish one instructional, then the next one is up.</p>`;
     if (steps.length) {
       html += `<ol class="road">${steps.map((s, i) => {
@@ -1049,7 +1101,7 @@
     } else {
       html += `<p class="muted small">No steps yet. Add instructionals below in the order you want to study them.</p>`;
     }
-    const myDrills = Store.drills().filter(d => listOf(d) === r.id).sort(drillSort);
+    const myDrills = Store.drills().filter(d => listOf(d) === r.id && !d.archived).sort(drillSort);
     html += `<h3>📝 Notes for this roadmap</h3>
       <textarea id="rmNotes" rows="4" placeholder="Goals, ideas, what to focus on…">${esc(r.notes || '')}</textarea><div class="muted small" id="rmNoteState"></div>
       <h3>🥋 Drills for this roadmap</h3>
@@ -1420,19 +1472,18 @@
       const d = v.duration;
       if (!isFinite(d) || !d) { $('#marks').innerHTML = ''; return; }
       let h = chs.filter(c => c.t > 0 && c.t < d).map(c => `<i class="cg" data-l="${(c.t / d * 100).toFixed(2)}"></i>`).join('');
-      h += Store.bookmarks().filter(b => b.itemId === id).map(b => `<i class="mk" data-l="${(b.t / d * 100).toFixed(2)}"></i>`).join('');
+      h += Store.bookmarks().filter(b => b.itemId === id && !b.archived).map(b => `<i class="mk" data-l="${(b.t / d * 100).toFixed(2)}"></i>`).join('');
       if (loopA !== null) h += `<b class="lz" data-l="${(loopA / d * 100).toFixed(2)}" data-w="${(((loopB ?? v.currentTime) - loopA) / d * 100).toFixed(2)}"></b>`;
       $('#marks').innerHTML = h; applySizes($('#marks'));
     }
 
     // --- bookmarks list under the video
     function renderBms() {
-      const list = Store.bookmarks().filter(b => b.itemId === id).sort((a, b) => a.t - b.t);
+      const list = Store.bookmarks().filter(b => b.itemId === id && !b.archived).sort((a, b) => a.t - b.t);
       $('#bmlist').innerHTML = list.length ? list.map(b => `
         <li class="bmrow"><button class="tbtn" data-act="seek" data-t="${b.t}">${fmt(b.t)}</button><span class="bml">${esc(b.label)}</span>
           <button class="ibtn" data-act="drillBm" data-id="${esc(b.id)}" aria-label="Add to drills">+🥋</button>
-          <button class="ibtn" data-act="renameBm" data-id="${esc(b.id)}" aria-label="Rename">✎</button>
-          <button class="ibtn" data-act="delBm" data-id="${esc(b.id)}" aria-label="Delete">🗑</button></li>`).join('')
+          ${moreBtn('bm', b.id)}</li>`).join('')
         : '<li class="muted small">No bookmarks yet. Tap 🔖 Mark while watching to save a moment.</li>';
       drawMarks();
     }
@@ -1544,8 +1595,7 @@
     return `<li class="drow ${d.done ? 'done' : ''}"><button class="check ${d.done ? 'on' : ''}" data-act="toggleDrill" data-id="${esc(d.id)}" aria-label="Done">✓</button>
       <span class="dtxt">${esc(d.text)}${where ? `<small>${esc(where)}</small>` : ''}</span>
       ${d.itemId ? `<a class="ibtn" href="#/watch/${enc(d.itemId)}${d.t !== null ? '?t=' + Math.floor(d.t) : ''}" aria-label="Watch">▶</a>` : ''}
-      <button class="ibtn" data-act="moveDrill" data-id="${esc(d.id)}" aria-label="Move to another list">⇄</button>
-      <button class="ibtn" data-act="delDrill" data-id="${esc(d.id)}" aria-label="Delete">🗑</button></li>`;
+      ${d.archived ? archBtns('drill', d.id) : moreBtn('drill', d.id)}</li>`;
   }
 
   // A named note that isn't tied to a video.
@@ -1555,12 +1605,19 @@
     app.innerHTML = `<a class="back" href="#/study?tab=notes">‹ Notes</a>
       <input id="nTitle" class="search title-in" maxlength="120" placeholder="Note name" value="${esc(n.title)}">
       <textarea id="nText" rows="14" placeholder="Write anything: game plan, competition notes, ideas…">${esc(n.text)}</textarea>
-      <div class="rowbetween"><span class="muted small" id="nState">${ago(n.updated)}</span><button class="btn danger sm" id="nDel">Delete note</button></div>`;
+      <div class="rowbetween"><span class="muted small" id="nState">${ago(n.updated)}</span>
+        <span class="btns"><button class="btn ghost sm" id="nArch">${n.archived ? '↩ Restore' : '🗄 Archive'}</button><button class="btn danger sm" id="nDel">Delete note</button></span></div>`;
     let timer = null;
     const save = () => { timer = null; Store.d.snotes[id] = { ...Store.d.snotes[id], title: $('#nTitle').value.trim() || 'Untitled note', text: $('#nText').value, updated: now() }; Store.save(); $('#nState').textContent = 'Saved ✓'; };
     const later = () => { $('#nState').textContent = 'Saving…'; clearTimeout(timer); timer = setTimeout(save, 600); };
     $('#nTitle').addEventListener('input', later);
     $('#nText').addEventListener('input', later);
+    $('#nArch').onclick = () => {
+      if (timer) { clearTimeout(timer); save(); }
+      const on = !Store.d.snotes[id].archived;
+      archiveRec('snote', id, on);
+      location.hash = '#/study?tab=notes';
+    };
     $('#nDel').onclick = () => {
       if (!confirm('Delete this note?')) return;
       clearTimeout(timer); timer = null;
@@ -1582,12 +1639,18 @@
     const dlId = dl === 'all' || dl === 'general' ? null : dl;
     const ownList = dlId && Store.d.dlists[dlId];
     let top = '';
-    if (tab === 'drills') {
+    const arch = inArch(tab);
+    if (arch) {
+      top = `<div class="rmhead"><button class="ibtn" data-act="archView" data-id="${tab}" aria-label="Back">‹</button><h2>🗄 Archived ${tab}</h2></div>
+        <p class="muted small">Hidden from your lists. ↩ brings one back, 🗑 deletes it.</p>`;
+    } else if (tab === 'drills') {
       top = `<div class="chips">
           <button class="chip ${dl === 'all' ? 'on' : ''}" data-act="selDl" data-id="all">All</button>
           ${allLists().map(l => { const v = l.id === null ? 'general' : l.id; return `<button class="chip ${dl === v ? 'on' : ''}" data-act="selDl" data-id="${esc(v)}">${esc(l.name)}</button>`; }).join('')}
           <button class="chip add" data-act="newList">+ New list</button></div>
-        ${ownList ? `<div class="rmhead"><h2>${esc(ownList.name)}</h2><button class="ibtn" data-act="renameList" data-id="${esc(dlId)}" aria-label="Rename list">✎</button><button class="ibtn" data-act="delList" data-id="${esc(dlId)}" aria-label="Delete list">🗑</button></div>` : ''}
+        ${ownList ? `<div class="rmhead"><h2>${esc(ownList.name)}</h2><button class="ibtn" data-act="renameList" data-id="${esc(dlId)}" aria-label="Rename list">✎</button>
+          <button class="ibtn" data-act="arch" data-kind="dlist" data-id="${esc(dlId)}" aria-label="Archive list">🗄</button>
+          <button class="ibtn" data-act="del" data-kind="dlist" data-id="${esc(dlId)}" aria-label="Delete list">🗑</button></div>` : ''}
         ${dlId && Store.d.roadmaps[dlId] ? `<p class="small"><a class="link" href="#/roadmap" data-act="openRm" data-id="${esc(dlId)}">Open this roadmap ›</a></p>` : ''}
         <div class="addrow"><input id="drillIn" maxlength="200" placeholder="Add a move to ${esc(dl === 'all' ? 'General' : listName(dlId))}…"><button class="btn primary" id="drillAdd">Add</button></div>`;
     } else if (tab === 'notes') {
@@ -1604,39 +1667,51 @@
       const match = (...xs) => !q || xs.some(x => String(x || '').toLowerCase().includes(q));
       let html = '';
       if (tab === 'bookmarks') {
-        const list = Store.bookmarks().filter(b => match(b.label, vname(b.itemId), Library.get(b.itemId) && Library.get(b.itemId).s.name)).sort((a, b) => b.created - a.created);
+        const all = Store.bookmarks().filter(b => match(b.label, vname(b.itemId), Library.get(b.itemId) && Library.get(b.itemId).s.name));
+        const list = all.filter(b => !!b.archived === arch).sort((a, b) => b.created - a.created);
         html = list.length ? `<ul class="list">${list.map(b => `
           <li class="srow"><a href="#/watch/${enc(b.itemId)}?t=${Math.floor(b.t)}"><b>${esc(b.label)}</b><small>${esc(vname(b.itemId))} · ${fmt(b.t)}</small></a>
-            <button class="ibtn" data-act="drillBm" data-id="${esc(b.id)}" aria-label="Add to drills">+🥋</button>
-            <button class="ibtn" data-act="delBm" data-id="${esc(b.id)}" aria-label="Delete">🗑</button></li>`).join('')}</ul>`
-          : emptyState(q ? 'No matches' : 'No bookmarks yet', q ? 'Try another word.' : 'While watching, tap 🔖 Mark to save a moment.');
+            ${arch ? archBtns('bm', b.id) : `<button class="ibtn" data-act="drillBm" data-id="${esc(b.id)}" aria-label="Add to drills">+🥋</button>${moreBtn('bm', b.id)}`}</li>`).join('')}</ul>`
+          : emptyState(q ? 'No matches' : arch ? 'Nothing archived' : 'No bookmarks yet', q ? 'Try another word.' : arch ? 'Bookmarks you archive show up here.' : 'While watching, tap 🔖 Mark to save a moment.');
+        if (!arch) html += archLink('bookmarks', Store.bookmarks().filter(b => b.archived).length);
       } else if (tab === 'notes') {
         // Your named notes, roadmap notes and video notes, newest first.
         const items = [
-          ...Object.values(Store.d.snotes).filter(n => !n.deleted).map(n => ({ href: '#/note/' + enc(n.id), title: '📄 ' + n.title, text: n.text, updated: n.updated })),
-          ...roadmaps().filter(r => (r.notes || '').trim()).map(r => ({ href: '#/roadmap', act: r.id, title: '🗺️ ' + r.name, text: r.notes, updated: r.updated })),
-          ...Object.entries(Store.d.notes).filter(([, n]) => !n.deleted && n.text.trim()).map(([k, n]) => ({ href: '#/watch/' + enc(k), title: '🎬 ' + vname(k), text: n.text, updated: n.updated })),
+          ...Object.values(Store.d.snotes).filter(n => !n.deleted && !!n.archived === arch).map(n => ({ kind: 'snote', id: n.id, href: '#/note/' + enc(n.id), title: '📄 ' + n.title, text: n.text, updated: n.updated })),
+          ...(arch ? [] : roadmaps().filter(r => (r.notes || '').trim()).map(r => ({ href: '#/roadmap', act: r.id, title: '🗺️ ' + r.name, text: r.notes, updated: r.updated }))),
+          ...Object.entries(Store.d.notes).filter(([, n]) => !n.deleted && n.text.trim() && !!n.archived === arch).map(([k, n]) => ({ kind: 'vnote', id: k, href: '#/watch/' + enc(k), title: '🎬 ' + vname(k), text: n.text, updated: n.updated })),
         ].filter(x => match(x.title, x.text)).sort((a, b) => b.updated - a.updated);
         html = items.length ? `<ul class="list">${items.map(x => `
-          <li class="srow note"><a href="${x.href}" ${x.act ? `data-act="openRm" data-id="${esc(x.act)}"` : ''}><b>${esc(x.title)}</b>${x.text ? `<p>${esc(x.text)}</p>` : ''}<small>${ago(x.updated)}</small></a></li>`).join('')}</ul>`
-          : emptyState(q ? 'No matches' : 'No notes yet', q ? 'Try another word.' : 'Tap "+ New note", or write notes under any video.');
+          <li class="srow note"><a href="${x.href}" ${x.act ? `data-act="openRm" data-id="${esc(x.act)}"` : ''}><b>${esc(x.title)}</b>${x.text ? `<p>${esc(x.text)}</p>` : ''}<small>${ago(x.updated)}</small></a>
+            ${x.kind ? (arch ? archBtns(x.kind, x.id) : moreBtn(x.kind, x.id)) : ''}</li>`).join('')}</ul>`
+          : emptyState(q ? 'No matches' : arch ? 'Nothing archived' : 'No notes yet', q ? 'Try another word.' : arch ? 'Notes you archive show up here.' : 'Tap "+ New note", or write notes under any video.');
+        if (!arch) html += archLink('notes', archivedOf('snotes').length + archivedOf('notes').filter(([, n]) => (n.text || '').trim()).length);
+      } else if (arch) {
+        // Archived drill lists and roadmaps (with their drills), then single archived drills.
+        const lists = [...archivedOf('dlists').map(([k, l]) => ({ kind: 'dlist', id: k, name: '🥋 ' + l.name })), ...archivedOf('roadmaps').map(([k, r]) => ({ kind: 'rm', id: k, name: '🗺️ ' + r.name }))];
+        const cnt = id => Store.drills().filter(d => d.listId === id).length;
+        const list = Store.drills().filter(d => d.archived && match(d.text, d.itemId && vname(d.itemId), listName(d.listId))).sort(drillSort);
+        html = (lists.length ? `<h3>Lists</h3><ul class="list">${lists.map(x => `<li class="srow"><span class="dtxt"><b>${esc(x.name)}</b><small>${cnt(x.id)} drills</small></span>${archBtns(x.kind, x.id)}</li>`).join('')}</ul>` : '')
+          + (list.length ? `<h3>Drills</h3><ul class="list">${list.map(d => drillRow(d, true)).join('')}</ul>` : '')
+          || emptyState('Nothing archived', 'Drills and lists you archive show up here.');
       } else {
         const inView = d => dl === 'all' || (dl === 'general' ? listOf(d) === null : listOf(d) === dlId);
-        const list = Store.drills().filter(d => inView(d) && match(d.text, d.itemId && vname(d.itemId), listName(listOf(d)))).sort(drillSort);
+        const list = Store.drills().filter(d => liveDrill(d) && inView(d) && match(d.text, d.itemId && vname(d.itemId), listName(listOf(d)))).sort(drillSort);
         const doneN = list.filter(d => d.done).length;
         html = list.length ? `<ul class="list">${list.map(d => drillRow(d, dl === 'all')).join('')}</ul>
-            ${doneN ? `<button class="btn ghost full" data-act="clearDrills">Clear ${doneN} finished</button>` : ''}`
+            ${doneN ? `<button class="btn ghost full" data-act="clearDrills" data-ids="${esc(list.filter(d => d.done).map(d => d.id).join(','))}">Tidy up ${doneN} finished…</button>` : ''}`
           : emptyState(q ? 'No matches' : 'This list is empty', q ? 'Try another word.' : 'Add moves you want to practice.');
+        html += archLink('drills', Store.drills().filter(d => d.archived).length + archivedOf('dlists').length + archivedOf('roadmaps').length);
       }
       $('#studyList').innerHTML = html;
     };
     $('#q').addEventListener('input', draw);
-    if (tab === 'drills') {
+    if (tab === 'drills' && !arch) {
       const add = () => { const t = $('#drillIn').value.trim(); if (!t) return; addDrill(t, null, null, dlId); Store.save(); $('#drillIn').value = ''; draw(); };
       $('#drillAdd').onclick = add;
       $('#drillIn').onkeydown = e => { if (e.key === 'Enter') add(); };
     }
-    if (tab === 'notes') $('#newNote').onclick = () => {
+    if (tab === 'notes' && !arch) $('#newNote').onclick = () => {
       const n = { id: uid(), title: 'Untitled note', text: '', created: now(), updated: now() };
       Store.d.snotes[n.id] = n; Store.save(); location.hash = '#/note/' + enc(n.id);
     };
@@ -1743,8 +1818,30 @@
     const b = e.target.closest('[data-act]');
     if (!b) return;
     e.preventDefault();
-    const { act, id } = b.dataset;
+    let { act } = b.dataset;
+    const { id, kind } = b.dataset;
     const bm = id && Store.d.bookmarks[id];
+    // ⋯ = one small menu per row, so rows don't get crowded with buttons.
+    if (act === 'more' && KINDS[kind]) {
+      const rec = Store.d[KINDS[kind].store][id];
+      if (!rec) return;
+      const opts = [
+        ...(kind === 'bm' ? [{ label: '✎ Rename', value: 'renameBm' }] : []),
+        ...(kind === 'drill' ? [{ label: '⇄ Move to another list', value: 'moveDrill' }] : []),
+        { label: '🗄 Archive (hide, keep it)', value: 'arch' },
+        { label: '🗑 Delete', value: 'del' },
+      ];
+      const picked = await choose(KINDS[kind].name, opts);
+      if (!picked) return;
+      act = picked;
+    }
+    if (act === 'arch' || act === 'unarch') {
+      archiveRec(kind, id, act === 'arch');
+      if (kind === 'rm' || kind === 'dlist') route(); else redraw();
+      return;
+    }
+    if (act === 'del') { if (deleteRec(kind, id)) { if (kind === 'rm' || kind === 'dlist') { if (kind === 'dlist' && sessionStorage.getItem('bjj.dl') === id) sessionStorage.setItem('bjj.dl', 'all'); route(); } else redraw(); } return; }
+    if (act === 'archView') { const k = 'bjj.arch.' + id; if (inArch(id)) sessionStorage.removeItem(k); else sessionStorage.setItem(k, '1'); route(); return; }
     if (act === 'seek' && seekHere) seekHere(+b.dataset.t);
     else if (act === 'toggleDone') { setDone(id, !isDone(id)); route(); return; }
     else if (act === 'toggleFav') { toast(toggleFav(id) ? 'Added to favorites ⭐' : 'Removed from favorites'); route(); return; }
@@ -1837,7 +1934,15 @@
     else if (act === 'delDrill') {
       const d = Store.d.drills[id]; Store.d.drills[id] = { ...d, deleted: true, updated: now() }; Store.save();
       toast('Drill deleted', { label: 'Undo', fn: () => { Store.d.drills[id] = { ...d, updated: now() }; Store.save(); if (refresh) refresh(); } });
-    } else if (act === 'clearDrills') { Store.drills().filter(d => d.done).forEach(d => { Store.d.drills[d.id] = { ...d, deleted: true, updated: now() }; }); Store.save(); }
+    } else if (act === 'clearDrills') {
+      const ids = (b.dataset.ids || '').split(',').filter(x => Store.d.drills[x]);
+      if (!ids.length) return;
+      const how = await choose(`${ids.length} finished drill${ids.length > 1 ? 's' : ''}`, [{ label: '🗄 Archive them (hide, keep them)', value: 'archived' }, { label: '🗑 Delete them', value: 'deleted' }]);
+      if (!how) return;
+      const before = ids.map(x => Store.d.drills[x]);
+      ids.forEach(x => { Store.d.drills[x] = { ...Store.d.drills[x], [how]: true, updated: now() }; }); Store.save();
+      toast(`${ids.length} drill${ids.length > 1 ? 's' : ''} ${how}`, { label: 'Undo', fn: () => { before.forEach(d => { Store.d.drills[d.id] = { ...d, updated: now() }; }); Store.save(); redraw(); } });
+    }
     if (refresh) refresh();
   });
 

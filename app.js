@@ -1831,7 +1831,7 @@
         <div class="btns"><button class="btn ghost" id="theme">${theme === 'dark' ? '☀️ Light mode' : '🌙 Dark mode'}</button></div>
         <h3>🌐 Language</h3>
         <div class="btns" translate="no"><button class="btn ${lang === 'en' ? 'primary' : 'ghost'}" data-lang="en">English</button><button class="btn ${lang === 'es' ? 'primary' : 'ghost'}" data-lang="es">Español</button></div>
-        <div class="btns"><a class="btn ghost" href="guide.html#${lang}" target="_blank" rel="noopener">📖 User guide</a></div></div>
+        <div class="btns"><a class="btn ghost" href="guide.html#${lang}">📖 User guide</a></div></div>
       <div class="panel"><h3>🏷️ My custom tags</h3>
         ${customTags().length ? `<ul class="list">${Object.entries(Store.d.tagdefs).filter(([, t]) => !t.deleted).sort((a, b) => a[1].name.localeCompare(b[1].name)).map(([k, t]) => `
           <li class="srow"><a class="dtxt" href="#/tag/${enc(t.name)}">${esc(t.name)}</a><button class="ibtn" data-act="delTag" data-id="${esc(k)}" aria-label="Delete tag">🗑</button></li>`).join('')}</ul>`

@@ -1184,7 +1184,7 @@
     }
     function bumpHide() {
       pl.classList.remove('hidectl'); clearTimeout(hideTimer);
-      if (document.fullscreenElement === pl && !v.paused && $('#sheetwrap').hidden) hideTimer = setTimeout(() => pl.classList.add('hidectl'), 3000);
+      if (document.fullscreenElement === pl && !v.paused && $('#sheetwrap').hidden) hideTimer = setTimeout(() => pl.classList.add('hidectl'), 2500);
     }
     // double-tap left/right to skip, single tap = play/pause (or show controls in fullscreen)
     function onTap(zone) {
@@ -1195,7 +1195,11 @@
       clearTimeout(tapTimer); tapZone = zone;
       tapTimer = setTimeout(() => {
         tapTimer = null;
-        if (document.fullscreenElement === pl && pl.classList.contains('hidectl')) bumpHide(); else { togglePlay(); bumpHide(); }
+        // Fullscreen: a tap shows or hides the controls (like YouTube). Normal view: a tap plays/pauses.
+        if (document.fullscreenElement === pl) {
+          if (pl.classList.contains('hidectl')) bumpHide();
+          else { clearTimeout(hideTimer); pl.classList.add('hidectl'); }
+        } else { togglePlay(); bumpHide(); }
       }, 260);
     }
     $$('.tap', pl).forEach(z => z.addEventListener('click', () => onTap(z.dataset.z)));
@@ -1253,7 +1257,7 @@
       if (page === 'main') {
         s.innerHTML = `<div class="mhead"><b>Settings</b><button class="ic" data-m="close" aria-label="Close">✕</button></div>`
           + row('sleep', '🌙', 'Sleep timer', sleepLabel()) + row('speed', '🐢', 'Playback speed', speedLabel())
-          + row('loop', '🔁', loopA === null ? 'Loop a move' : 'Stop loop', loopLabel(), false)
+          + row('loop', '🔁', loopA === null ? 'Loop a move' : 'Stop loop', loopLabel(), false)          + row('mirror', '⇋', 'Mirror', mirrored ? 'On' : 'Off', false)
           + (document.pictureInPictureEnabled ? row('pip', '🗗', 'Mini player', '', false) : '')
           + row('auto', '⏭️', 'Auto-play next', autoOn() ? 'On' : 'Off', false);
       } else if (page === 'speed') {
@@ -1290,7 +1294,8 @@
         closeSheet();
         try { if (document.pictureInPictureElement) await document.exitPictureInPicture(); else await v.requestPictureInPicture(); }
         catch { toast('Mini player is not available right now.'); }
-      } else if (m === 'auto') { toggleAuto(); openSheet('main'); }
+      } else if (m === 'mirror') { $('#mirror').click(); openSheet('main'); }
+      else if (m === 'auto') { toggleAuto(); openSheet('main'); }
       else if (m === 'setCh') { v.currentTime = chs[+x].t; v.play().catch(() => {}); closeSheet(); }
     };
     function checkSleep() {

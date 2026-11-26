@@ -174,10 +174,26 @@ small { display: block; color: var(--muted); font-size: .82rem; }
 #dlgNew { margin-top: 8px; }
 #dlgNew[hidden] { display: none; }
 
-.player.fs { display: flex; flex-direction: column; justify-content: center; margin: 0; width: 100vw; height: 100vh; }
-.player.fs .vbox { flex: 1; aspect-ratio: auto; }
-.player.fs .ctl { position: absolute; left: 0; right: 0; bottom: 0; background: linear-gradient(transparent, rgba(0,0,0,.88) 30%); padding: 30px 20px 14px; }
-.player.fs .tools { max-width: 640px; margin: 8px auto 0; }
+/* fullscreen: the video fills the screen exactly (no zoom/crop); controls are one slim strip */
+.player.fs { margin: 0; width: 100vw; height: 100vh; height: 100dvh; overflow: hidden; }
+.player.fs .vbox { position: absolute; inset: 0; aspect-ratio: auto; }
+.player.fs .vbox video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
+.player.fs .ctl { position: absolute; left: 0; right: 0; bottom: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px;
+  background: linear-gradient(transparent, rgba(0,0,0,.8) 45%); padding: 26px max(16px, env(safe-area-inset-right)) max(8px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left)); }
+.player.fs .seekwrap { flex: 0 0 100%; height: 26px; }
+.player.fs .ctlrow { display: contents; }
+.player.fs .ctlrow.tools { display: contents; }
+.player.fs #mirror { display: none; }
+.player.fs #bm { order: 8; margin-left: auto; flex: none; min-height: 40px; padding: 0 14px; border-radius: 99px; background: rgba(255,255,255,.14); font-size: .9rem; }
+.player.fs #time { order: 1; }
+.player.fs #chapBtn { order: 2; flex: 1 1 0; min-width: 0; max-width: 30vw; }
+.player.fs #prevV { order: 3; margin-left: auto; }
+.player.fs #back10 { order: 4; } .player.fs #play { order: 5; } .player.fs #fwd10 { order: 6; } .player.fs #nextV { order: 7; }
+.player.fs #apBtn { order: 9; margin-left: 4px; } .player.fs #gear { order: 10; } .player.fs #fs { order: 11; }
+.player.fs .cbtn { height: 40px; min-width: 50px; border-radius: 12px; font-size: .9rem; background: rgba(255,255,255,.12); }
+.player.fs .cbtn.sm { min-width: 36px; background: transparent; }
+.player.fs .cbtn.play { height: 44px; min-width: 52px; border-radius: 50%; font-size: 1.1rem; background: var(--accent); }
+.player.fs .sheetwrap { z-index: 6; }
 .player.hidectl .ctl { opacity: 0; pointer-events: none; }
 .player.hidectl { cursor: none; }
 

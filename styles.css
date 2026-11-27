@@ -326,3 +326,6 @@ a.vrow { color: inherit; }
 .guide .toc a { padding: 6px 12px; border-radius: 99px; background: var(--bg2); border: 1px solid var(--line); font-size: .88rem; }
 .guide .note { background: var(--bg2); border-left: 3px solid var(--accent); padding: 10px 14px; border-radius: 8px; }
 .guide .topright .chip { min-height: 32px; padding: 4px 12px; display: inline-flex; align-items: center; }
+/* highlight the language the guide is showing */
+.guide:not(:has(#es:target, #es :target)) .l-en, .guide:has(#es:target, #es :target) .l-es { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); font-weight: 600; }
+.guide .lang { scroll-margin-top: 70px; }

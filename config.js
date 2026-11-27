@@ -9,5 +9,5 @@ window.BJJ_CONFIG = {
 
   // People you invite. When a friend signs in, the page shows them a code; add it here in quotes.
   // Remove a code to take their access away.
-  FRIEND_HASHES: [],
+  FRIEND_HASHES: ['8fb6f5320374c033aa1d59274ee5cb5b'],
 };
